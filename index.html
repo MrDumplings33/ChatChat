@@ -396,13 +396,14 @@
             <h2 class="text-xl font-bold text-slate-100">Edit Profile & Avatar</h2>
             
             <div class="flex flex-col items-center space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800">
-                <label class="text-xs font-bold text-slate-400 uppercase tracking-wider">Profile Picture (Drag to Pan & Scale)</label>
+                <label class="text-xs font-bold text-slate-400 uppercase tracking-wider">Profile Picture (Drag to Pan & Zoom)</label>
                 <div class="relative w-36 h-36 rounded-full overflow-hidden border-2 border-indigo-500 shadow-xl bg-slate-900 flex items-center justify-center">
-                    <canvas id="pfp-crop-canvas" width="200" height="200" class="w-full h-full cursor-move touch-none"></canvas>
+                    <canvas id="pfp-crop-canvas" width="256" height="256" class="w-full h-full cursor-move touch-none"></canvas>
                 </div>
                 <div class="flex items-center gap-2 w-full max-w-xs pt-1">
-                    <span class="text-[10px] text-slate-400 font-bold uppercase">Scale:</span>
-                    <input type="range" id="pfp-crop-zoom" min="0.5" max="3" step="0.05" value="1" class="w-full accent-indigo-500 cursor-pointer">
+                    <span class="text-[10px] text-slate-400 font-bold uppercase shrink-0">Zoom:</span>
+                    <input type="range" id="pfp-crop-zoom" min="1" max="4" step="0.01" value="1" class="w-full accent-indigo-500 cursor-pointer">
+                    <button type="button" id="pfp-center-btn" class="text-[10px] bg-slate-800 hover:bg-slate-700 text-indigo-300 font-bold px-2 py-1 rounded border border-slate-700 cursor-pointer shrink-0" title="Zoom Out & Center">Center</button>
                 </div>
                 <div class="flex gap-2 w-full pt-1">
                     <button type="button" onclick="document.getElementById('pfp-crop-input').click()" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold py-2 rounded-lg border border-slate-700 transition-colors cursor-pointer">
@@ -831,9 +832,12 @@
         let onlineUsersMap = new Map();
         let lastUserHeartbeat = new Map();
         let allKnownUsers = new Set();
-        let manualStanding = 'online';
+        let preferredStanding = 'online'; // User's chosen standing state
+        let manualStanding = 'online';    // Active effective standing state
         let presenceChannel = null;
         let moderationChannel = null;
+        let lastProfilesSyncTs = 0;
+        let profilesSyncPromise = null;
 
         // Device Identity, Bans, Shadowbans, Timeouts
         let deviceHardwareId = null;
@@ -880,10 +884,12 @@
         let localAudioAnalyser = null;
         let audioVUInterval = null;
 
+        // Profile Picture Cropper State (Centered & Normalized Full Zoom-Out)
         let pfpImg = null;
-        let pfpScale = 1;
-        let pfpX = 0;
-        let pfpY = 0;
+        let pfpZoom = 1;
+        let pfpOffsetX = 0;
+        let pfpOffsetY = 0;
+        let pfpModified = false;
         let isDraggingPfp = false;
         let pfpDragStartX = 0;
         let pfpDragStartY = 0;
@@ -944,21 +950,44 @@
             }
         });
 
-        document.addEventListener('visibilitychange', () => {
+        function handleTabInactive() {
             if (!currentUser) return;
+            if (preferredStanding === 'online' && manualStanding !== 'idle') {
+                updateStandingState('idle', false);
+            }
+        }
+
+        function handleTabActive() {
+            if (!currentUser) return;
+            if (preferredStanding === 'online' && manualStanding !== 'online') {
+                updateStandingState('online', false);
+            }
+        }
+
+        document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
-                if (manualStanding === 'online') updateStandingState('idle');
+                handleTabInactive();
             } else {
-                if (manualStanding === 'online') updateStandingState('online');
+                handleTabActive();
             }
         });
 
         window.addEventListener('blur', () => {
-            if (currentUser && manualStanding === 'online') updateStandingState('idle');
+            handleTabInactive();
         });
 
         window.addEventListener('focus', () => {
-            if (currentUser && manualStanding === 'online') updateStandingState('online');
+            handleTabActive();
+        });
+
+        window.addEventListener('pageshow', () => {
+            if (!document.hidden) handleTabActive();
+        });
+
+        ['pointerdown', 'keydown'].forEach(evtName => {
+            window.addEventListener(evtName, () => {
+                if (!document.hidden) handleTabActive();
+            }, { passive: true });
         });
 
         const notifyImmediateDeparture = () => {
@@ -1325,7 +1354,6 @@
                 try {
                     const cached = typeof localBanCacheRaw === 'string' ? JSON.parse(localBanCacheRaw) : localBanCacheRaw;
                     if (cached && cached.banned) {
-                        // Verify if unbanned on server (if server responded with records and none matched, clear stale local cache)
                         if (sysRecords) {
                             localStorage.removeItem('mesh_device_ban_cache');
                             await idbSet('mesh_device_ban_cache', null);
@@ -1593,7 +1621,6 @@
                 let deletedCount = 0;
 
                 for (const prof of allProfiles) {
-                    // Never delete current user or root admin
                     if (currentUser && prof.id === currentUser.id) continue;
                     if (prof.username && prof.username.toLowerCase() === 'sillygoobah33') continue;
 
@@ -1623,27 +1650,68 @@
         }
 
         // ==========================================
-        // 7. @ USERNAME AUTO-PREDICT SYSTEM
+        // 7. @ USERNAME AUTO-PREDICT & DISPLAY NAME MENTIONS
         // ==========================================
-        async function preloadAllUserProfiles() {
-            const { data: profiles } = await supabaseClient.from('profiles').select('*');
-            if (profiles) {
-                profiles.forEach(p => {
-                    userProfileCache.set(p.username, p);
-                    allKnownUsers.add(p.username);
-                });
-            }
+        async function preloadAllUserProfiles(force = false) {
+            if (!force && profilesSyncPromise) return profilesSyncPromise;
+            if (!force && Date.now() - lastProfilesSyncTs < 4000 && userProfileCache.size > 0) return;
+
+            profilesSyncPromise = (async () => {
+                try {
+                    const { data: profiles, error } = await supabaseClient.from('profiles').select('*');
+                    if (!error && Array.isArray(profiles)) {
+                        const validUsernames = new Set();
+                        profiles.forEach(p => {
+                            if (p && p.username && USERNAME_REGEX.test(p.username)) {
+                                userProfileCache.set(p.username, p);
+                                validUsernames.add(p.username);
+                            }
+                        });
+                        // Remove any non-existent / deleted usernames from cache
+                        for (const cachedUname of Array.from(userProfileCache.keys())) {
+                            if (!validUsernames.has(cachedUname)) {
+                                userProfileCache.delete(cachedUname);
+                            }
+                        }
+                        allKnownUsers.clear();
+                        validUsernames.forEach(u => allKnownUsers.add(u));
+                        lastProfilesSyncTs = Date.now();
+                    }
+                } finally {
+                    profilesSyncPromise = null;
+                }
+            })();
+
+            return profilesSyncPromise;
         }
 
         function getAllCandidateProfiles() {
-            const map = new Map();
-            userProfileCache.forEach((prof, uname) => map.set(uname, prof));
-            allKnownUsers.forEach(uname => {
-                if (!map.has(uname)) {
-                    map.set(uname, { username: uname, display_name: uname, avatar_url: null });
+            // Strictly return ONLY verified existing profiles from the database
+            return Array.from(userProfileCache.values()).filter(
+                p => p && p.username && USERNAME_REGEX.test(p.username)
+            );
+        }
+
+        async function ensureMentionProfilesLoaded(rawText) {
+            if (!rawText) return;
+            const matches = rawText.match(/@([a-z0-9_.]+)/g);
+            if (!matches) return;
+            const uniqueHandles = new Set(matches.map(m => m.slice(1).toLowerCase()));
+            for (const uname of uniqueHandles) {
+                if (!userProfileCache.has(uname)) {
+                    await fetchProfile(uname);
                 }
+            }
+        }
+
+        function formatSafeTextWithMentions(rawText) {
+            const safeContent = escapeHTML(rawText);
+            return safeContent.replace(/@([a-z0-9_.]+)/g, (fullMatch, uname) => {
+                const prof = userProfileCache.get(uname);
+                if (!prof) return fullMatch;
+                const displayName = prof.display_name || prof.username;
+                return `<span data-mention-username="${escapeHTML(uname)}" title="@${escapeHTML(uname)}" class="bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded font-semibold cursor-pointer hover:underline hover:bg-indigo-500/30 transition-colors" onclick="showUserProfile('${escapeHTML(uname)}')">@${escapeHTML(displayName)}</span>`;
             });
-            return Array.from(map.values());
         }
 
         function setupChatMentionAutocomplete() {
@@ -1657,6 +1725,15 @@
                     currentMentionMatches = [];
                     activeMentionRange = null;
                     return;
+                }
+
+                // Trigger background refresh of profiles so newly created or deleted accounts stay accurate
+                if (Date.now() - lastProfilesSyncTs > 4000) {
+                    preloadAllUserProfiles(false).then(() => {
+                        if (!mentionAutocomplete.classList.contains('hidden')) {
+                            updateMentionSuggestions();
+                        }
+                    });
                 }
 
                 const query = match[1].toLowerCase();
@@ -1907,46 +1984,107 @@
             contextMenu.classList.add('hidden');
         });
 
+        // ==========================================
+        // PROFILE PICTURE CROPPER (FULL ZOOM-OUT & ALWAYS CENTERED)
+        // ==========================================
+        function clampPfpOffset(canvas) {
+            if (!pfpImg || !pfpImg.naturalWidth || !pfpImg.naturalHeight) {
+                pfpOffsetX = 0;
+                pfpOffsetY = 0;
+                return;
+            }
+            if (pfpZoom <= 1.001) {
+                pfpOffsetX = 0;
+                pfpOffsetY = 0;
+                return;
+            }
+            const baseScale = Math.min(canvas.width / pfpImg.naturalWidth, canvas.height / pfpImg.naturalHeight);
+            const effectiveScale = baseScale * pfpZoom;
+            const drawW = pfpImg.naturalWidth * effectiveScale;
+            const drawH = pfpImg.naturalHeight * effectiveScale;
+
+            const maxPanX = Math.max(0, (drawW - canvas.width) / 2);
+            const maxPanY = Math.max(0, (drawH - canvas.height) / 2);
+
+            pfpOffsetX = Math.max(-maxPanX, Math.min(maxPanX, pfpOffsetX));
+            pfpOffsetY = Math.max(-maxPanY, Math.min(maxPanY, pfpOffsetY));
+        }
+
+        function resetPfpZoomAndCenter(markModified = true) {
+            const zoomSlider = document.getElementById('pfp-crop-zoom');
+            pfpZoom = 1;
+            pfpOffsetX = 0;
+            pfpOffsetY = 0;
+            if (zoomSlider) zoomSlider.value = 1;
+            if (markModified && pfpImg) pfpModified = true;
+            drawPfpCrop();
+        }
+
         function setupPfpCropper() {
             const canvas = document.getElementById('pfp-crop-canvas');
             const input = document.getElementById('pfp-crop-input');
             const zoomSlider = document.getElementById('pfp-crop-zoom');
+            const centerBtn = document.getElementById('pfp-center-btn');
             if (!canvas) return;
 
             input.addEventListener('change', (e) => {
                 if (e.target.files && e.target.files[0]) {
                     const reader = new FileReader();
                     reader.onload = (evt) => {
-                        pfpImg = new Image();
-                        pfpImg.onload = () => {
-                            pfpScale = 1;
-                            zoomSlider.value = 1;
-                            pfpX = (canvas.width - pfpImg.width) / 2;
-                            pfpY = (canvas.height - pfpImg.height) / 2;
-                            drawPfpCrop();
+                        const img = new Image();
+                        img.onload = () => {
+                            pfpImg = img;
+                            pfpModified = true;
+                            resetPfpZoomAndCenter(false);
                         };
-                        pfpImg.src = evt.target.result;
+                        img.src = evt.target.result;
                     };
                     reader.readAsDataURL(e.target.files[0]);
+                    e.target.value = '';
                 }
             });
 
             zoomSlider.addEventListener('input', (e) => {
-                pfpScale = parseFloat(e.target.value);
+                pfpZoom = parseFloat(e.target.value) || 1;
+                if (pfpImg) pfpModified = true;
                 drawPfpCrop();
             });
+
+            if (centerBtn) {
+                centerBtn.addEventListener('click', () => {
+                    resetPfpZoomAndCenter(true);
+                });
+            }
+
+            // Mouse wheel zoom centered on canvas
+            canvas.addEventListener('wheel', (e) => {
+                if (!pfpImg) return;
+                e.preventDefault();
+                const delta = e.deltaY < 0 ? 0.1 : -0.1;
+                pfpZoom = Math.max(1, Math.min(4, Number((pfpZoom + delta).toFixed(2))));
+                zoomSlider.value = pfpZoom;
+                pfpModified = true;
+                drawPfpCrop();
+            }, { passive: false });
 
             const startDrag = (clientX, clientY) => {
                 if (!pfpImg) return;
                 isDraggingPfp = true;
-                pfpDragStartX = clientX - pfpX;
-                pfpDragStartY = clientY - pfpY;
+                const rect = canvas.getBoundingClientRect();
+                const ratioX = rect.width ? (canvas.width / rect.width) : 1;
+                const ratioY = rect.height ? (canvas.height / rect.height) : 1;
+                pfpDragStartX = clientX * ratioX - pfpOffsetX;
+                pfpDragStartY = clientY * ratioY - pfpOffsetY;
             };
 
             const doDrag = (clientX, clientY) => {
-                if (!isDraggingPfp) return;
-                pfpX = clientX - pfpDragStartX;
-                pfpY = clientY - pfpDragStartY;
+                if (!isDraggingPfp || !pfpImg) return;
+                const rect = canvas.getBoundingClientRect();
+                const ratioX = rect.width ? (canvas.width / rect.width) : 1;
+                const ratioY = rect.height ? (canvas.height / rect.height) : 1;
+                pfpOffsetX = clientX * ratioX - pfpDragStartX;
+                pfpOffsetY = clientY * ratioY - pfpDragStartY;
+                pfpModified = true;
                 drawPfpCrop();
             };
 
@@ -1958,10 +2096,10 @@
 
             canvas.addEventListener('touchstart', (e) => {
                 if (e.touches.length === 1) startDrag(e.touches[0].clientX, e.touches[0].clientY);
-            });
+            }, { passive: true });
             window.addEventListener('touchmove', (e) => {
                 if (isDraggingPfp && e.touches.length === 1) doDrag(e.touches[0].clientX, e.touches[0].clientY);
-            });
+            }, { passive: true });
             window.addEventListener('touchend', endDrag);
         }
 
@@ -1969,40 +2107,42 @@
             const canvas = document.getElementById('pfp-crop-canvas');
             if (!canvas) return;
             const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            if (pfpImg) {
-                const sw = pfpImg.width * pfpScale;
-                const sh = pfpImg.height * pfpScale;
+            const cw = canvas.width;
+            const ch = canvas.height;
+            ctx.clearRect(0, 0, cw, ch);
+
+            if (pfpImg && pfpImg.complete && pfpImg.naturalWidth > 0) {
+                clampPfpOffset(canvas);
+                const baseScale = Math.min(cw / pfpImg.naturalWidth, ch / pfpImg.naturalHeight);
+                const effectiveScale = baseScale * pfpZoom;
+                const drawW = pfpImg.naturalWidth * effectiveScale;
+                const drawH = pfpImg.naturalHeight * effectiveScale;
+                const drawX = (cw - drawW) / 2 + pfpOffsetX;
+                const drawY = (ch - drawH) / 2 + pfpOffsetY;
+
                 ctx.save();
                 ctx.beginPath();
-                ctx.arc(canvas.width / 2, canvas.height / 2, canvas.width / 2, 0, Math.PI * 2);
+                ctx.arc(cw / 2, ch / 2, cw / 2, 0, Math.PI * 2);
                 ctx.clip();
-                ctx.drawImage(pfpImg, pfpX, pfpY, sw, sh);
+
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(0, 0, cw, ch);
+
+                ctx.drawImage(pfpImg, drawX, drawY, drawW, drawH);
                 ctx.restore();
-            } else if (currentUser && currentUser.avatar_url) {
-                const img = new Image();
-                img.crossOrigin = 'anonymous';
-                img.onload = () => {
-                    ctx.save();
-                    ctx.beginPath();
-                    ctx.arc(canvas.width / 2, canvas.height / 2, canvas.width / 2, 0, Math.PI * 2);
-                    ctx.clip();
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                    ctx.restore();
-                };
-                img.src = currentUser.avatar_url;
             } else {
+                ctx.save();
                 ctx.fillStyle = '#4f46e5';
                 ctx.beginPath();
-                ctx.arc(canvas.width / 2, canvas.height / 2, canvas.width / 2, 0, Math.PI * 2);
+                ctx.arc(cw / 2, ch / 2, cw / 2, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.fillStyle = '#ffffff';
-                ctx.font = 'bold 72px sans-serif';
+                ctx.font = 'bold 92px sans-serif';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 const initial = currentUser ? (currentUser.display_name || currentUser.username).charAt(0).toUpperCase() : '?';
-                ctx.fillText(initial, canvas.width / 2, canvas.height / 2);
+                ctx.fillText(initial, cw / 2, ch / 2);
+                ctx.restore();
             }
         }
 
@@ -2154,6 +2294,7 @@
 
         document.getElementById('open-admin-panel-btn').addEventListener('click', async () => {
             document.getElementById('admin-panel-modal').classList.remove('hidden');
+            await preloadAllUserProfiles(true);
             await refreshAdminStats();
             await refreshAdminReports();
             await refreshAdminModerationLists();
@@ -3192,7 +3333,6 @@
 
                 if (payload.type === 'user_joined_call') {
                     peerMediaStates.set(payload.username, { micMuted: false, camMuted: false, displayName: payload.displayName, avatarUrl: payload.avatarUrl });
-                    // Reset any pending un-connected peer connection so we send a fresh WebRTC offer
                     if (peerConnections.has(payload.username)) {
                         try { peerConnections.get(payload.username).close(); } catch(e) {}
                         peerConnections.delete(payload.username);
@@ -3809,7 +3949,8 @@
 
         function setReplyTarget(msgId, username, text) {
             replyTargetMsg = { id: msgId, username, text };
-            document.getElementById('reply-target-user').textContent = username;
+            const prof = userProfileCache.get(username);
+            document.getElementById('reply-target-user').textContent = prof ? (prof.display_name || prof.username) : username;
             document.getElementById('reply-target-text').textContent = text;
             document.getElementById('reply-preview').classList.remove('hidden');
             msgInput.focus();
@@ -3878,7 +4019,7 @@
                     showToast("Failed to edit message", "error");
                 } else {
                     showToast("Message edited", "success");
-                    updateMessageUIContent(msgId, fullText, true);
+                    await updateMessageUIContent(msgId, fullText, true);
                     editForm.remove();
                 }
             };
@@ -3905,7 +4046,7 @@
             }
         }
 
-        function updateMessageUIContent(msgId, newFullText, isEdited = false) {
+        async function updateMessageUIContent(msgId, newFullText, isEdited = false) {
             const el = document.getElementById(`msg-${msgId}`);
             if (!el) return;
 
@@ -3915,8 +4056,8 @@
                 textContent = textContent.replace(/^\[REPLY:[^\]]+\]\s*/, '');
                 textContent = textContent.replace(/\[INVITE:[^\]]+\]/g, '').trim();
 
-                let safeContent = escapeHTML(textContent);
-                safeContent = safeContent.replace(/@([a-z0-9_.]+)/g, '<span class="text-indigo-400 font-semibold cursor-pointer hover:underline" onclick="showUserProfile(\'$1\')">@$1</span>');
+                await ensureMentionProfilesLoaded(textContent);
+                const safeContent = formatSafeTextWithMentions(textContent);
 
                 contentEl.innerHTML = `${safeContent} ${isEdited ? '<span class="text-[10px] text-slate-500 italic ml-1">(edited)</span>' : ''}`;
             }
@@ -3974,9 +4115,12 @@
                 const rText = decodeURIComponent(replyMatch[3]);
                 textContent = textContent.replace(/^\[REPLY:[^\]]+\]\s*/, '');
 
+                const rProf = await fetchProfile(rUser);
+                const rDisplayName = rProf ? (rProf.display_name || rProf.username) : rUser;
+
                 replyQuoteHTML = `
                     <div onclick="scrollToMessage('${escapeHTML(rMsgId)}')" class="mb-2 p-2 rounded-lg bg-slate-950/80 border-l-2 border-indigo-500 text-[11px] cursor-pointer hover:bg-slate-900 transition-colors">
-                        <span class="font-bold text-indigo-400">Replying to @${escapeHTML(rUser)}</span>
+                        <span class="font-bold text-indigo-400">Replying to @${escapeHTML(rDisplayName)}</span>
                         <p class="truncate text-slate-300 italic">${escapeHTML(rText)}</p>
                     </div>
                 `;
@@ -4015,8 +4159,8 @@
                 `;
             }
 
-            let safeContent = escapeHTML(textContent);
-            safeContent = safeContent.replace(/@([a-z0-9_.]+)/g, '<span class="text-indigo-400 font-semibold cursor-pointer hover:underline" onclick="showUserProfile(\'$1\')">@$1</span>');
+            await ensureMentionProfilesLoaded(textContent);
+            const safeContent = formatSafeTextWithMentions(textContent);
 
             let mediaContent = '';
             if (msg.media_url) {
@@ -4098,10 +4242,32 @@
         document.getElementById('open-profile-btn').addEventListener('click', () => {
             document.getElementById('edit-display-name').value = currentUser.display_name || currentUser.username;
             document.getElementById('edit-bio').value = currentUser.bio || '';
-            document.getElementById('edit-standing-select').value = manualStanding;
+            document.getElementById('edit-standing-select').value = preferredStanding;
             document.getElementById('edit-status-text').value = currentUser.custom_status || '';
+
             pfpImg = null;
-            drawPfpCrop();
+            pfpZoom = 1;
+            pfpOffsetX = 0;
+            pfpOffsetY = 0;
+            pfpModified = false;
+            document.getElementById('pfp-crop-zoom').value = 1;
+
+            if (currentUser.avatar_url) {
+                const existingImg = new Image();
+                existingImg.crossOrigin = 'anonymous';
+                existingImg.onload = () => {
+                    pfpImg = existingImg;
+                    drawPfpCrop();
+                };
+                existingImg.onerror = () => {
+                    pfpImg = null;
+                    drawPfpCrop();
+                };
+                existingImg.src = currentUser.avatar_url;
+            } else {
+                drawPfpCrop();
+            }
+
             profileModal.classList.remove('hidden');
         });
 
@@ -4117,24 +4283,27 @@
 
             let avatar_url = currentUser.avatar_url;
 
-            if (pfpImg) {
+            if (pfpImg && pfpModified) {
                 const canvas = document.getElementById('pfp-crop-canvas');
-                const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
-
                 try {
-                    const filePath = `avatars/${currentUser.id}_${Date.now()}.jpg`;
-                    const res = await fetch(croppedDataUrl);
-                    const blob = await res.blob();
+                    const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
+                    try {
+                        const filePath = `avatars/${currentUser.id}_${Date.now()}.jpg`;
+                        const res = await fetch(croppedDataUrl);
+                        const blob = await res.blob();
 
-                    const { error: uploadErr } = await supabaseClient.storage.from('chat-media').upload(filePath, blob, { upsert: true });
-                    if (!uploadErr) {
-                        const { data: urlData } = supabaseClient.storage.from('chat-media').getPublicUrl(filePath);
-                        avatar_url = urlData.publicUrl;
-                    } else {
+                        const { error: uploadErr } = await supabaseClient.storage.from('chat-media').upload(filePath, blob, { upsert: true });
+                        if (!uploadErr) {
+                            const { data: urlData } = supabaseClient.storage.from('chat-media').getPublicUrl(filePath);
+                            avatar_url = urlData.publicUrl;
+                        } else {
+                            avatar_url = croppedDataUrl;
+                        }
+                    } catch(e) {
                         avatar_url = croppedDataUrl;
                     }
-                } catch(e) {
-                    avatar_url = croppedDataUrl;
+                } catch (canvasSecurityErr) {
+                    // Keep existing avatar_url if external image couldn't be exported
                 }
             }
 
@@ -4151,11 +4320,17 @@
                 currentUser.bio = bio;
                 currentUser.custom_status = custom_status;
                 currentUser.avatar_url = avatar_url;
-                manualStanding = standing;
+                currentUser.standing = standing;
+                preferredStanding = standing;
                 userProfileCache.set(currentUser.username, currentUser);
-                
+
+                // Immediately update any mentions of this user visible in chat
+                document.querySelectorAll(`[data-mention-username="${CSS.escape(currentUser.username)}"]`).forEach(el => {
+                    el.textContent = `@${display_name}`;
+                });
+
                 updateUserDisplayUI();
-                updateStandingState(standing);
+                updateStandingState(standing, true);
                 profileModal.classList.add('hidden');
                 showToast("Profile settings updated!", "success");
             } else {
@@ -4228,7 +4403,8 @@
             if (modCheck.banned) return;
 
             currentUser = profile;
-            manualStanding = profile.standing || 'online';
+            preferredStanding = profile.standing || 'online';
+            manualStanding = (document.hidden && preferredStanding === 'online') ? 'idle' : preferredStanding;
             userProfileCache.set(profile.username, profile);
             allKnownUsers.add(profile.username);
 
@@ -4251,7 +4427,7 @@
 
             await linkCurrentDeviceToUser(profile.username);
             await touchUserLastActive();
-            await preloadAllUserProfiles();
+            await preloadAllUserProfiles(true);
             runInactiveUsersAutoCleanup(false);
 
             loadUserJoinedChannels();
@@ -4365,7 +4541,6 @@
 
         function handleIncomingPresenceSignal(username, standing) {
             if (!username) return;
-            allKnownUsers.add(username);
             if (!standing || standing === 'offline') {
                 onlineUsersMap.delete(username);
                 lastUserHeartbeat.delete(username);
@@ -4407,49 +4582,66 @@
 
             const processPresenceState = () => {
                 const state = presenceChannel.presenceState();
-                Object.keys(state).forEach(uname => {
-                    allKnownUsers.add(uname);
-                    const userPresences = state[uname];
-                    if (userPresences && userPresences.length > 0) {
-                        const latest = userPresences[userPresences.length - 1];
-                        if (latest && latest.standing !== 'offline') {
-                            onlineUsersMap.set(uname, latest.standing || 'online');
-                            lastUserHeartbeat.set(uname, Date.now());
+                const now = Date.now();
+                const seenInPresence = new Set();
+
+                for (const key in state) {
+                    const userInfos = state[key];
+                    if (userInfos && userInfos.length > 0) {
+                        const latestInfo = userInfos[userInfos.length - 1];
+                        const uname = latestInfo.username || key;
+                        const st = latestInfo.standing || 'online';
+                        seenInPresence.add(uname);
+                        if (st === 'offline') {
+                            onlineUsersMap.delete(uname);
+                            lastUserHeartbeat.delete(uname);
+                        } else {
+                            onlineUsersMap.set(uname, st);
+                            lastUserHeartbeat.set(uname, now);
                         }
                     }
-                });
+                }
+
+                // Prune any users not in Presence state whose last fast heartbeat is > 2s old
+                for (const [uname] of Array.from(onlineUsersMap.entries())) {
+                    if (uname === currentUser?.username) continue;
+                    if (!seenInPresence.has(uname)) {
+                        const lastHb = lastUserHeartbeat.get(uname) || 0;
+                        if (now - lastHb > 2000) {
+                            onlineUsersMap.delete(uname);
+                            lastUserHeartbeat.delete(uname);
+                        }
+                    }
+                }
                 schedulePresenceUIRender();
             };
 
             presenceChannel
+                .on('presence', { event: 'sync' }, processPresenceState)
+                .on('presence', { event: 'join' }, ({ key, newPresences }) => {
+                    if (newPresences && newPresences.length > 0) {
+                        const info = newPresences[newPresences.length - 1];
+                        handleIncomingPresenceSignal(info.username || key, info.standing || 'online');
+                    }
+                })
+                .on('presence', { event: 'leave' }, ({ key }) => {
+                    if (key && key !== currentUser?.username) {
+                        onlineUsersMap.delete(key);
+                        lastUserHeartbeat.delete(key);
+                        schedulePresenceUIRender();
+                    }
+                })
                 .on('broadcast', { event: 'presence-ping' }, ({ payload }) => {
                     if (payload && payload.username) {
                         handleIncomingPresenceSignal(payload.username, payload.standing || 'online');
                     }
                 })
                 .on('broadcast', { event: 'presence-leave' }, ({ payload }) => {
-                    if (payload && payload.username) {
+                    if (payload && payload.username && payload.username !== currentUser?.username) {
                         onlineUsersMap.delete(payload.username);
                         lastUserHeartbeat.delete(payload.username);
                         schedulePresenceUIRender();
                     }
-                })
-                .on('presence', { event: 'sync' }, processPresenceState)
-                .on('presence', { event: 'join' }, ({ key, newPresences }) => {
-                    allKnownUsers.add(key);
-                    if (newPresences && newPresences[0]) {
-                        const st = newPresences[0].standing || 'online';
-                        if (st !== 'offline') {
-                            onlineUsersMap.set(key, st);
-                            lastUserHeartbeat.set(key, Date.now());
-                        }
-                    }
-                    schedulePresenceUIRender();
-                })
-                .on('presence', { event: 'leave' }, ({ key }) => {
-                    onlineUsersMap.delete(key);
-                    lastUserHeartbeat.delete(key);
-                    schedulePresenceUIRender();
                 })
                 .subscribe(async (status) => {
                     if (status === 'SUBSCRIBED') {
@@ -4462,31 +4654,32 @@
                     }
                 });
 
-            // 400ms fast heartbeat (< 1 second delay)
             if (presenceHeartbeatInterval) clearInterval(presenceHeartbeatInterval);
             presenceHeartbeatInterval = setInterval(() => {
-                if (currentUser) broadcastSelfPresencePing();
-            }, 400);
+                broadcastSelfPresencePing();
+            }, 900);
 
-            // 250ms staleness reaper: drops inactive peers in <= 950ms (< 1s)
             if (presenceReaperInterval) clearInterval(presenceReaperInterval);
             presenceReaperInterval = setInterval(() => {
                 const now = Date.now();
                 let changed = false;
-                onlineUsersMap.forEach((_, uname) => {
-                    if (currentUser && uname === currentUser.username) return;
-                    const lastTs = lastUserHeartbeat.get(uname) || 0;
-                    if (now - lastTs > 950) {
+                for (const [uname] of Array.from(onlineUsersMap.entries())) {
+                    if (uname === currentUser?.username) continue;
+                    const lastHb = lastUserHeartbeat.get(uname) || 0;
+                    if (now - lastHb > 2500) {
                         onlineUsersMap.delete(uname);
                         lastUserHeartbeat.delete(uname);
                         changed = true;
                     }
-                });
+                }
                 if (changed) schedulePresenceUIRender();
-            }, 250);
+            }, 800);
         }
 
-        async function updateStandingState(newStanding) {
+        async function updateStandingState(newStanding, isExplicitChoice = false) {
+            if (isExplicitChoice) {
+                preferredStanding = newStanding;
+            }
             manualStanding = newStanding;
             document.getElementById('self-standing-dot').className = `w-2.5 h-2.5 rounded-full inline-block ${getStandingColorClass(newStanding)}`;
             broadcastSelfPresencePing();
@@ -4499,19 +4692,32 @@
             }
         }
 
+        function getStandingColorClass(standing) {
+            if (standing === 'online') return 'bg-emerald-500';
+            if (standing === 'idle') return 'bg-amber-400';
+            if (standing === 'dnd') return 'bg-rose-500';
+            return 'bg-slate-600';
+        }
+
+        function renderStandingBadgeDot(standing) {
+            return `<span class="w-2 h-2 rounded-full inline-block shrink-0 ${getStandingColorClass(standing)}"></span>`;
+        }
+
         function updatePresenceUI() {
-            let onlineCount = 0;
-            onlineUsersMap.forEach((standing) => {
-                if (standing && standing !== 'offline') onlineCount++;
-            });
-            document.getElementById('online-counter-text').textContent = `${onlineCount} Online`;
-            document.getElementById('self-standing-dot').className = `w-2.5 h-2.5 rounded-full inline-block ${getStandingColorClass(manualStanding)}`;
-            
-            updatePresenceModalList();
+            const count = onlineUsersMap.size;
+            document.getElementById('online-counter-text').textContent = `${count} Online`;
+            const adminActiveStat = document.getElementById('admin-stat-active');
+            if (adminActiveStat) adminActiveStat.textContent = count;
+
+            if (!document.getElementById('presence-modal').classList.contains('hidden')) {
+                updatePresenceModalList();
+            }
+
             loadFriends();
         }
 
-        function openPresenceModal() {
+        async function openPresenceModal() {
+            await preloadAllUserProfiles(true);
             updatePresenceModalList();
             document.getElementById('presence-modal').classList.remove('hidden');
         }
@@ -4519,280 +4725,180 @@
         function updatePresenceModalList() {
             const onlineContainer = document.getElementById('presence-online-users');
             const offlineContainer = document.getElementById('presence-offline-users');
-            if (!onlineContainer || !offlineContainer) return;
-
             onlineContainer.innerHTML = '';
             offlineContainer.innerHTML = '';
 
-            let hasOnline = false;
-            let hasOffline = false;
+            let onlineCount = 0;
+            let offlineCount = 0;
 
-            allKnownUsers.forEach(uname => {
-                const standing = onlineUsersMap.get(uname);
-                const isOnline = standing && standing !== 'offline';
-
-                const div = document.createElement('div');
-                div.className = "flex items-center justify-between p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs";
-                div.innerHTML = `
-                    <div class="flex items-center gap-2">
-                        ${renderStandingBadgeDot(isOnline ? standing : 'offline')}
-                        <span class="font-bold text-slate-200 cursor-pointer hover:underline" onclick="showUserProfile('${escapeHTML(uname)}')">@${escapeHTML(uname)}</span>
+            userProfileCache.forEach((prof, uname) => {
+                const standing = onlineUsersMap.get(uname) || 'offline';
+                const dname = prof.display_name || uname;
+                const row = document.createElement('div');
+                row.className = "flex items-center justify-between p-2 rounded-lg bg-slate-950/70 border border-slate-800/80 text-xs";
+                row.innerHTML = `
+                    <div class="flex items-center gap-2 min-w-0">
+                        ${renderStandingBadgeDot(standing)}
+                        <div class="truncate">
+                            <span onclick="showUserProfile('${escapeHTML(uname)}'); document.getElementById('presence-modal').classList.add('hidden');" class="font-bold text-slate-200 cursor-pointer hover:underline">${escapeHTML(dname)}</span>
+                            <span class="text-[10px] text-indigo-400 ml-1">@${escapeHTML(uname)}</span>
+                        </div>
                     </div>
-                    <span class="text-[10px] ${isOnline ? 'text-emerald-400 font-semibold' : 'text-slate-500'} uppercase font-mono">${isOnline ? standing : 'Offline'}</span>
+                    <span class="text-[10px] text-slate-500 uppercase font-semibold shrink-0">${standing}</span>
                 `;
 
-                if (isOnline) {
-                    onlineContainer.appendChild(div);
-                    hasOnline = true;
+                if (standing !== 'offline') {
+                    onlineContainer.appendChild(row);
+                    onlineCount++;
                 } else {
-                    offlineContainer.appendChild(div);
-                    hasOffline = true;
+                    offlineContainer.appendChild(row);
+                    offlineCount++;
                 }
             });
 
-            if (!hasOnline) onlineContainer.innerHTML = '<p class="text-xs text-slate-500 italic">No users active.</p>';
-            if (!hasOffline) offlineContainer.innerHTML = '<p class="text-xs text-slate-500 italic">No offline users cached.</p>';
+            if (onlineCount === 0) onlineContainer.innerHTML = '<p class="text-xs text-slate-500 italic">No users online.</p>';
+            if (offlineCount === 0) offlineContainer.innerHTML = '<p class="text-xs text-slate-500 italic">No offline users.</p>';
         }
 
-        function getStandingColorClass(standing) {
-            switch (standing) {
-                case 'online': return 'bg-emerald-500';
-                case 'idle': return 'bg-amber-400';
-                case 'dnd': return 'bg-rose-500';
-                default: return 'bg-slate-500';
+        function updateUserDisplayUI() {
+            if (!currentUser) return;
+            document.getElementById('current-user-display').textContent = currentUser.display_name || currentUser.username;
+            document.getElementById('current-user-status').textContent = currentUser.custom_status || '';
+            const avatarEl = document.getElementById('user-avatar');
+            if (currentUser.avatar_url) {
+                avatarEl.innerHTML = `<img src="${escapeHTML(currentUser.avatar_url)}" class="w-full h-full object-cover">`;
+            } else {
+                avatarEl.textContent = (currentUser.display_name || currentUser.username).charAt(0).toUpperCase();
             }
-        }
-
-        function renderStandingBadgeDot(standing) {
-            return `<span class="inline-block w-2.5 h-2.5 rounded-full ${getStandingColorClass(standing)} shrink-0"></span>`;
+            document.getElementById('self-standing-dot').className = `w-2.5 h-2.5 rounded-full inline-block ${getStandingColorClass(manualStanding)}`;
         }
 
         async function fetchProfile(username) {
+            if (!username) return null;
             if (userProfileCache.has(username)) return userProfileCache.get(username);
             const { data } = await supabaseClient.from('profiles').select('*').eq('username', username).maybeSingle();
-            if (data) userProfileCache.set(username, data);
+            if (data) {
+                userProfileCache.set(username, data);
+                allKnownUsers.add(username);
+            }
             return data;
         }
 
         async function showUserProfile(username) {
-            const profile = await fetchProfile(username);
-            if (!profile) return showAlert("Profile Error", "Profile not found.");
-
-            const avatarEl = document.getElementById('view-profile-avatar');
-            if (profile.avatar_url) {
-                avatarEl.innerHTML = `<img src="${profile.avatar_url}" class="w-full h-full object-cover rounded-full">`;
-            } else {
-                avatarEl.textContent = (profile.display_name || profile.username).charAt(0).toUpperCase();
-            }
-
-            document.getElementById('view-profile-dname').textContent = profile.display_name || profile.username;
-            document.getElementById('view-profile-uname').textContent = `@${profile.username}`;
-            document.getElementById('view-profile-status').textContent = profile.custom_status ? `💬 ${profile.custom_status}` : '';
-            document.getElementById('view-profile-bio').textContent = profile.bio || "No bio provided.";
+            const prof = await fetchProfile(username);
+            if (!prof) return;
+            document.getElementById('view-profile-dname').textContent = prof.display_name || prof.username;
+            document.getElementById('view-profile-uname').textContent = `@${prof.username}`;
+            document.getElementById('view-profile-status').textContent = prof.custom_status || '';
+            document.getElementById('view-profile-bio').textContent = prof.bio || "No bio set.";
+            const av = document.getElementById('view-profile-avatar');
+            if (prof.avatar_url) av.innerHTML = `<img src="${escapeHTML(prof.avatar_url)}" class="w-full h-full object-cover">`;
+            else av.textContent = (prof.display_name || prof.username).charAt(0).toUpperCase();
             document.getElementById('view-profile-modal').classList.remove('hidden');
         }
 
         // ==========================================
-        // 15. CHANNELS, FRIENDS & DMs
+        // 15. FRIENDS SYSTEM & STRICT FRIENDS-ONLY DMs
         // ==========================================
-        async function loadChannels() {
-            const channelList = document.getElementById('channel-list');
-            channelList.innerHTML = '';
-
-            customChannelsSet.forEach(cid => {
-                const cname = channelNamesMap.get(cid) || `# ${cid}`;
-                const btn = document.createElement('button');
-                btn.dataset.channel = cid;
-                btn.dataset.name = cname;
-                const isActive = activeChannel === cid;
-                const unread = unreadCounts[cid] || 0;
-
-                let textClass = 'text-slate-400 hover:bg-slate-800 hover:text-slate-200';
-                if (isActive) {
-                    textClass = 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30';
-                } else if (unread > 0) {
-                    textClass = cid === 'general' ? 'text-white font-bold bg-slate-800/80 border border-slate-700' : 'text-slate-200 font-bold bg-slate-900 border border-slate-800';
-                }
-
-                let badgeHTML = '';
-                if (unread > 0 && !isActive) {
-                    if (cid === 'general') {
-                        badgeHTML = `<span class="bg-white text-slate-950 font-black text-[10px] px-2 py-0.5 rounded-full shadow animate-pulse shrink-0">NEW</span>`;
-                    } else {
-                        badgeHTML = `<span class="bg-rose-600 text-white font-black text-[10px] px-2 py-0.5 rounded-full shadow min-w-[20px] text-center animate-pulse shrink-0">${unread}</span>`;
-                    }
-                }
-
-                const isPrivateIcon = (cid !== 'general' && cid !== 'announcements') ? '<span class="text-[10px] opacity-60">🔒</span> ' : '';
-
-                btn.className = `channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold ${textClass} transition-colors flex items-center justify-between cursor-pointer gap-2`;
-                btn.innerHTML = `<span class="truncate">${isPrivateIcon}${cname}</span> ${badgeHTML}`;
-                channelList.appendChild(btn);
-            });
-
-            document.querySelectorAll('.channel-btn').forEach(btn => {
-                btn.addEventListener('contextmenu', (e) => {
-                    e.preventDefault();
-                    contextChannelId = btn.dataset.channel;
-                    contextChannelName = btn.dataset.name;
-                    contextMenu.style.top = `${e.clientY}px`;
-                    contextMenu.style.left = `${e.clientX}px`;
-
-                    const contextInviteBtn = document.getElementById('context-invite-btn');
-                    const contextCopyBtn = document.getElementById('context-copy-link-btn');
-
-                    if (contextChannelId.startsWith('dm_')) {
-                        if (contextInviteBtn) contextInviteBtn.classList.add('hidden');
-                        if (contextCopyBtn) contextCopyBtn.classList.add('hidden');
-                    } else {
-                        if (contextInviteBtn) contextInviteBtn.classList.remove('hidden');
-                        if (contextCopyBtn) contextCopyBtn.classList.remove('hidden');
-                    }
-
-                    contextMenu.classList.remove('hidden');
-                });
-            });
-
-            updateChannelHeaderControls();
-        }
-
-        async function createNewChannel() {
-            const name = await showPrompt(
-                "Create Private Channel",
-                "Enter a name for your new private channel:",
-                "e.g. squad-hangout",
-                "Create Channel"
-            );
-            if (!name) return;
-            const channelId = 'chan_' + Math.random().toString(36).substring(2, 9);
-            const formattedName = `# ${name}`;
-
-            await supabaseClient.from('channels').insert([{ id: channelId, name: formattedName, creator_id: currentUser.id }]);
-            joinChannelById(channelId, formattedName);
-            showToast(`Private channel ${formattedName} created! Use Invite to add friends.`, "success");
-        }
-
-        document.getElementById('channel-list').addEventListener('click', (e) => {
-            const btn = e.target.closest('.channel-btn');
-            if (!btn) return;
-            activeChannel = btn.dataset.channel;
-            document.getElementById('active-channel-title').textContent = btn.dataset.name || btn.textContent.trim();
-            loadChannelMessages();
-            loadChannels();
-        });
-
-        function getDMChannelID(u1, u2) {
-            const sorted = [u1, u2].sort();
-            return `dm_${sorted[0]}||${sorted[1]}`;
-        }
-
         document.getElementById('add-friend-btn').addEventListener('click', async () => {
-            const input = document.getElementById('friend-username-input');
-            const targetUsername = input.value.trim().replace(/^@/, '').toLowerCase();
-            if (!targetUsername || targetUsername === currentUser.username) return;
+            const target = document.getElementById('friend-username-input').value.trim().toLowerCase();
+            if (!target || target === currentUser.username) return;
+            const { data: targetProfile } = await supabaseClient.from('profiles').select('id, username').eq('username', target).maybeSingle();
+            if (!targetProfile) return showAlert("User Not Found", `No user found with username "@${target}".`);
 
-            const { data: targetUser } = await supabaseClient.from('profiles').select('*').eq('username', targetUsername).maybeSingle();
-            if (!targetUser) return showAlert("Friend Search", "User not found.");
+            const { data: existing } = await supabaseClient.from('friends')
+                .select('*')
+                .or(`and(user_id.eq.${currentUser.id},friend_id.eq.${targetProfile.id}),and(user_id.eq.${targetProfile.id},friend_id.eq.${currentUser.id})`);
+            if (existing && existing.length > 0) return showAlert("Friend Request", "Friend request already exists or you are already friends.");
 
-            const { error } = await supabaseClient.from('friends').insert([{
-                user_id: currentUser.id,
-                friend_id: targetUser.id,
-                status: 'pending'
-            }]);
-            if (!error) {
-                input.value = '';
-                loadFriends();
-                showToast("Friend request sent!", "success");
-            }
+            await supabaseClient.from('friends').insert([{ user_id: currentUser.id, friend_id: targetProfile.id, status: 'pending' }]);
+            document.getElementById('friend-username-input').value = '';
+            loadFriends();
+            showToast(`Friend request sent to @${target}`, "success");
         });
 
         async function loadFriends() {
             if (!currentUser) return;
-            const { data: records } = await supabaseClient
+            const { data: friendships } = await supabaseClient
                 .from('friends')
-                .select(`id, user_id, friend_id, status, user_profile:profiles!user_id(username, display_name), friend_profile:profiles!friend_id(username, display_name)`)
+                .select('id, status, user_id, friend_id, sender:profiles!friends_user_id_fkey(username, display_name, avatar_url), receiver:profiles!friends_friend_id_fkey(username, display_name, avatar_url)')
                 .or(`user_id.eq.${currentUser.id},friend_id.eq.${currentUser.id}`);
 
-            userFriends.clear();
             const friendsList = document.getElementById('friends-list');
             const requestsList = document.getElementById('requests-list');
             const dmList = document.getElementById('dm-list');
             
+            if (!friendsList) return;
             friendsList.innerHTML = '';
             requestsList.innerHTML = '';
             dmList.innerHTML = '';
-            let hasDMs = false;
-            let hasRequests = false;
+            userFriends.clear();
 
-            if (records) {
-                records.forEach(req => {
-                    const isSender = req.user_id === currentUser.id;
-                    const other = isSender ? req.friend_profile : req.user_profile;
+            let pendingCount = 0;
+            let acceptedCount = 0;
+
+            if (friendships) {
+                friendships.forEach(f => {
+                    const isSender = f.user_id === currentUser.id;
+                    const other = isSender ? f.receiver : f.sender;
                     if (!other) return;
 
-                    allKnownUsers.add(other.username);
-                    const standing = onlineUsersMap.get(other.username) || 'offline';
-                    const otherDisplay = other.display_name || other.username;
-
-                    if (req.status === 'accepted') {
+                    if (f.status === 'pending') {
+                        pendingCount++;
+                        const reqDiv = document.createElement('div');
+                        reqDiv.className = "flex items-center justify-between text-xs bg-slate-950/70 p-2 rounded-lg border border-amber-500/30";
+                        if (isSender) {
+                            reqDiv.innerHTML = `<span class="text-slate-300 font-medium truncate">Sent to <b>@${escapeHTML(other.username)}</b></span> <span class="text-[10px] text-amber-400">Pending</span>`;
+                        } else {
+                            reqDiv.innerHTML = `
+                                <span class="text-slate-200 font-semibold truncate">@${escapeHTML(other.username)}</span>
+                                <div class="flex gap-1 shrink-0">
+                                    <button onclick="acceptFriend('${f.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded font-bold cursor-pointer">Accept</button>
+                                    <button onclick="declineFriend('${f.id}')" class="bg-rose-600 hover:bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded font-bold cursor-pointer">Reject</button>
+                                </div>`;
+                        }
+                        requestsList.appendChild(reqDiv);
+                    } else if (f.status === 'accepted') {
+                        acceptedCount++;
                         userFriends.add(other.username);
-                        hasDMs = true;
-                        
-                        const item = document.createElement('div');
-                        item.className = "flex items-center justify-between text-xs bg-slate-950 p-2 rounded-lg border border-slate-800 gap-1";
-                        item.innerHTML = `
-                            <span onclick="showUserProfile('${other.username}')" class="font-semibold text-slate-300 truncate cursor-pointer hover:underline flex items-center gap-1.5">
+                        const standing = onlineUsersMap.get(other.username) || 'offline';
+                        const dmId = getDMChannelID(currentUser.username, other.username);
+                        const unread = unreadCounts[dmId] || 0;
+
+                        const div = document.createElement('div');
+                        div.className = "flex items-center justify-between text-xs bg-slate-950/40 p-1.5 rounded-lg border border-slate-800/50";
+                        div.innerHTML = `
+                            <span onclick="showUserProfile('${escapeHTML(other.username)}')" class="text-slate-200 font-medium cursor-pointer hover:underline truncate flex items-center gap-1.5">
                                 ${renderStandingBadgeDot(standing)}
-                                <span class="truncate">${otherDisplay}</span>
+                                <span>${escapeHTML(other.display_name || other.username)}</span>
                             </span>
-                            <div class="flex gap-1 shrink-0">
-                                <button onclick="openDM('${other.username}')" class="bg-indigo-600/30 hover:bg-indigo-600 text-indigo-200 text-[10px] px-2 py-0.5 rounded cursor-pointer">DM</button>
-                            </div>
-                        `;
-                        friendsList.appendChild(item);
+                            <button onclick="openDM('${escapeHTML(other.username)}')" class="text-[10px] bg-slate-800 hover:bg-indigo-600 text-indigo-300 hover:text-white px-2 py-0.5 rounded transition-colors cursor-pointer shrink-0 flex items-center gap-1">
+                                <span>DM</span>
+                                ${unread > 0 ? `<span class="bg-rose-600 text-white text-[9px] font-black px-1.5 py-0.2 rounded-full">${unread}</span>` : ''}
+                            </button>`;
+                        friendsList.appendChild(div);
 
                         const dmBtn = document.createElement('button');
-                        const cid = getDMChannelID(currentUser.username, other.username);
-                        dmBtn.dataset.channel = cid;
-                        dmBtn.dataset.name = `@ ${otherDisplay}`;
-                        const isActive = activeChannel === cid;
-                        const unread = unreadCounts[cid] || 0;
-
-                        let textClass = 'text-slate-400 hover:bg-slate-800 hover:text-slate-200';
-                        if (isActive) {
-                            textClass = 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30';
-                        } else if (unread > 0) {
-                            textClass = 'text-slate-100 font-bold bg-slate-900 border border-slate-800';
-                        }
-
-                        let badgeHTML = '';
-                        if (unread > 0 && !isActive) {
-                            badgeHTML = `<span class="bg-rose-600 text-white font-black text-[10px] px-2 py-0.5 rounded-full shadow min-w-[20px] text-center animate-pulse shrink-0">${unread}</span>`;
-                        }
-
-                        dmBtn.className = `channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold ${textClass} transition-colors flex items-center justify-between cursor-pointer gap-2`;
-                        dmBtn.innerHTML = `<span class="flex items-center gap-1.5 min-w-0">${renderStandingBadgeDot(standing)} <span class="truncate">💬 ${otherDisplay}</span></span> ${badgeHTML}`;
+                        const isActiveDM = activeChannel === dmId;
+                        dmBtn.className = isActiveDM
+                            ? "w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-between gap-2 cursor-pointer"
+                            : "w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors flex items-center justify-between gap-2 cursor-pointer";
+                        dmBtn.innerHTML = `
+                            <div class="flex items-center gap-2 truncate">
+                                ${renderStandingBadgeDot(standing)}
+                                <span class="truncate">@ ${escapeHTML(other.display_name || other.username)}</span>
+                            </div>
+                            ${unread > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full shadow-lg shrink-0">${unread}</span>` : ''}
+                        `;
                         dmBtn.onclick = () => openDM(other.username);
                         dmList.appendChild(dmBtn);
-
-                    } else if (req.status === 'pending') {
-                        if (!isSender) {
-                            hasRequests = true;
-                            const reqItem = document.createElement('div');
-                            reqItem.className = "flex items-center justify-between text-xs bg-slate-950 p-2 rounded-lg border border-slate-800 gap-1";
-                            reqItem.innerHTML = `
-                                <span class="font-semibold text-slate-200 truncate">@${other.username}</span>
-                                <div class="flex gap-1 shrink-0">
-                                    <button onclick="acceptFriend('${req.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded cursor-pointer font-bold">✓</button>
-                                </div>
-                            `;
-                            requestsList.appendChild(reqItem);
-                        }
                     }
                 });
             }
-            if (!hasDMs) dmList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No active DMs</p>';
-            if (!hasRequests) requestsList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No pending requests</p>';
+
+            if (pendingCount === 0) requestsList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No pending requests</p>';
+            if (acceptedCount === 0) dmList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No active DMs</p>';
+
             checkAnnouncementsPermissions();
         }
 
@@ -4802,206 +4908,346 @@
             showToast("Friend request accepted!", "success");
         }
 
-        function openDM(targetUsername) {
+        async function declineFriend(id) {
+            await supabaseClient.from('friends').delete().eq('id', id);
+            loadFriends();
+            showToast("Friend request rejected", "info");
+        }
+
+        function getDMChannelID(u1, u2) {
+            return 'dm_' + [u1, u2].sort().join('||');
+        }
+
+        async function openDM(targetUsername) {
             if (!userFriends.has(targetUsername)) {
                 return showAlert("Friends Only", "You can only open Direct Messages with accepted friends.");
             }
-            const cid = getDMChannelID(currentUser.username, targetUsername);
-            activeChannel = cid;
-            document.getElementById('active-channel-title').textContent = `@ ${targetUsername}`;
+            const dmId = getDMChannelID(currentUser.username, targetUsername);
+            activeChannel = dmId;
+            const prof = userProfileCache.get(targetUsername);
+            document.getElementById('active-channel-title').textContent = `@ ${prof ? (prof.display_name || targetUsername) : targetUsername}`;
+
+            saveLastReadTimestamp(dmId);
+            unreadCounts[dmId] = 0;
+
+            loadChannels();
+            loadFriends();
+            updateChannelHeaderControls();
+            await loadChannelMessages();
+        }
+
+        // ==========================================
+        // 16. PRIVATE CHANNELS & REALTIME MESSAGES
+        // ==========================================
+        async function createNewChannel() {
+            const name = await showPrompt("Create Private Channel", "Enter a name for your new private channel:", "e.g. study-group", "Create Channel");
+            if (!name) return;
+            const slug = name.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-');
+            if (!slug) return;
+            const label = `# ${slug}`;
+
+            customChannelsSet.add(slug);
+            channelNamesMap.set(slug, label);
+            saveUserJoinedChannels();
+            activeChannel = slug;
+            document.getElementById('active-channel-title').textContent = label;
+            
+            saveLastReadTimestamp(slug);
+            unreadCounts[slug] = 0;
+
+            loadChannels();
             updateChannelHeaderControls();
             loadChannelMessages();
+            showToast(`Private channel ${label} created! Use Invite to add friends.`, "success");
+        }
+
+        function loadChannels() {
+            const list = document.getElementById('channel-list');
+            if (!list) return;
+            list.innerHTML = '';
+
+            customChannelsSet.forEach(cid => {
+                const cname = channelNamesMap.get(cid) || `# ${cid}`;
+                const btn = document.createElement('button');
+                const isActive = activeChannel === cid;
+                const unread = unreadCounts[cid] || 0;
+
+                btn.className = isActive
+                    ? "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-between cursor-pointer"
+                    : "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors flex items-center justify-between cursor-pointer";
+                
+                btn.dataset.channel = cid;
+                btn.dataset.name = cname;
+
+                btn.innerHTML = `
+                    <span class="truncate">${escapeHTML(cname)}</span>
+                    ${unread > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full shadow-lg shrink-0">${unread}</span>` : ''}
+                `;
+                
+                btn.onclick = () => {
+                    activeChannel = cid;
+                    document.getElementById('active-channel-title').textContent = cname;
+                    
+                    saveLastReadTimestamp(cid);
+                    unreadCounts[cid] = 0;
+
+                    loadChannels();
+                    loadFriends();
+                    updateChannelHeaderControls();
+                    loadChannelMessages();
+                };
+
+                btn.oncontextmenu = (e) => {
+                    e.preventDefault();
+                    contextChannelId = cid;
+                    contextChannelName = cname;
+                    contextMenu.style.top = `${e.clientY}px`;
+                    contextMenu.style.left = `${e.clientX}px`;
+                    contextMenu.classList.remove('hidden');
+                };
+
+                list.appendChild(btn);
+            });
         }
 
         async function loadChannelMessages() {
-            knownMessageIds.clear();
-            chatBox.innerHTML = '';
-            const { data } = await supabaseClient.from('chat_messages').select('*').eq('channel_id', activeChannel).order('created_at', { ascending: true }).limit(200);
-            if (data) {
-                for (const msg of data) {
-                    knownMessageIds.add(msg.id);
-                    await appendMessageUI(msg);
-                }
+            if (!isUserMemberOfChannelOrDM(activeChannel)) {
+                chatBox.innerHTML = `<div class="p-8 text-center text-xs text-slate-500">🔒 You are not a member of this private channel.</div>`;
+                return;
             }
 
-            if (unreadCounts[activeChannel] > 0 && unreadFirstMsgId[activeChannel]) {
-                const divider = document.getElementById('new-messages-divider');
-                if (divider) divider.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            } else {
-                chatBox.scrollTop = chatBox.scrollHeight;
-                saveLastReadTimestamp(activeChannel);
-                unreadCounts[activeChannel] = 0;
-                delete unreadFirstMsgId[activeChannel];
-                loadChannels();
-                loadFriends();
+            const { data: messages, error } = await supabaseClient
+                .from('chat_messages')
+                .select('*')
+                .eq('channel_id', activeChannel)
+                .order('created_at', { ascending: true })
+                .limit(100);
+
+            if (!error && messages) {
+                chatBox.innerHTML = '';
+                knownMessageIds.clear();
+                for (const m of messages) {
+                    knownMessageIds.add(m.id);
+                    await appendMessageUI(m);
+                }
+
+                if (!unreadFirstMsgId[activeChannel]) {
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                    saveLastReadTimestamp(activeChannel);
+                } else {
+                    const divider = document.getElementById('new-messages-divider');
+                    if (divider) divider.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
             }
         }
 
         function startFastPolling() {
             if (fastPollingInterval) clearInterval(fastPollingInterval);
-            fastPollingInterval = setInterval(() => {
-                if (currentUser && activeChannel) loadChannelMessagesInterval();
-            }, 800);
-        }
+            fastPollingInterval = setInterval(async () => {
+                if (!currentUser) return;
+                if (!isUserMemberOfChannelOrDM(activeChannel)) return;
 
-        async function loadChannelMessagesInterval() {
-            const { data } = await supabaseClient.from('chat_messages').select('*').eq('channel_id', activeChannel).order('created_at', { ascending: true }).limit(200);
-            if (data) {
-                for (const msg of data) {
-                    if (!knownMessageIds.has(msg.id)) {
-                        knownMessageIds.add(msg.id);
-                        await appendMessageUI(msg);
+                const { data: messages } = await supabaseClient
+                    .from('chat_messages')
+                    .select('*')
+                    .eq('channel_id', activeChannel)
+                    .order('created_at', { ascending: false })
+                    .limit(15);
+
+                if (messages) {
+                    const reversed = messages.reverse();
+                    for (const msg of reversed) {
+                        if (!knownMessageIds.has(msg.id)) {
+                            knownMessageIds.add(msg.id);
+                            await appendMessageUI(msg);
+                            saveLastReadTimestamp(activeChannel);
+                        }
                     }
                 }
-            }
+            }, 3000);
+        }
+
+        function listenToRealtimeMessages() {
+            supabaseClient
+                .channel('public:chat_messages')
+                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, async (payload) => {
+                    const msg = payload.new;
+                    if (isMessageShadowbannedForViewer(msg)) return;
+
+                    if (msg.channel_id === activeChannel) {
+                        if (!knownMessageIds.has(msg.id)) {
+                            knownMessageIds.add(msg.id);
+                            await appendMessageUI(msg);
+                            saveLastReadTimestamp(activeChannel);
+                        }
+                    } else if (isUserMemberOfChannelOrDM(msg.channel_id)) {
+                        if (msg.username !== currentUser?.username) {
+                            unreadCounts[msg.channel_id] = (unreadCounts[msg.channel_id] || 0) + 1;
+                            if (!unreadFirstMsgId[msg.channel_id]) {
+                                unreadFirstMsgId[msg.channel_id] = msg.id;
+                            }
+                            loadChannels();
+                            loadFriends();
+                        }
+                    }
+                })
+                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages' }, async (payload) => {
+                    const msg = payload.new;
+                    if (msg.channel_id === activeChannel) {
+                        await updateMessageUIContent(msg.id, msg.message, true);
+                    }
+                })
+                .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'chat_messages' }, (payload) => {
+                    const oldMsg = payload.old;
+                    if (oldMsg && oldMsg.id) {
+                        removeMessageUI(oldMsg.id);
+                        knownMessageIds.delete(oldMsg.id);
+                    }
+                })
+                .subscribe();
+
+            // Keep userProfileCache and mention auto-predict synced in real time with the profiles table
+            supabaseClient
+                .channel('public:profiles')
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
+                    if (payload.eventType === 'DELETE' && payload.old) {
+                        const oldUname = payload.old.username;
+                        if (oldUname) {
+                            userProfileCache.delete(oldUname);
+                            allKnownUsers.delete(oldUname);
+                        }
+                    } else if (payload.new && payload.new.username && USERNAME_REGEX.test(payload.new.username)) {
+                        userProfileCache.set(payload.new.username, payload.new);
+                        allKnownUsers.add(payload.new.username);
+                        document.querySelectorAll(`[data-mention-username="${CSS.escape(payload.new.username)}"]`).forEach(el => {
+                            el.textContent = `@${payload.new.display_name || payload.new.username}`;
+                        });
+                    }
+                })
+                .subscribe();
         }
 
         document.getElementById('chat-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             if (!currentUser) return;
 
-            // Block if timed out
-            const activeTo = getActiveSelfTimeout();
-            if (activeTo) {
-                return showAlert("Timed Out", `You cannot send messages while timed out. Reason: ${activeTo.reason}`);
+            if (getActiveSelfTimeout()) {
+                return showAlert("Timed Out", "You cannot send messages while timed out.");
             }
 
-            // Block non-friend DMs
             if (activeChannel.startsWith('dm_')) {
                 const dmPeer = getDMTargetUsername(activeChannel);
                 if (dmPeer && !userFriends.has(dmPeer)) {
                     return showAlert("Friends Only", "You can only send Direct Messages to accepted friends.");
                 }
             }
-            
+
             const isAnnouncements = activeChannel === 'announcements' || (channelNamesMap.get(activeChannel) || '').toLowerCase().includes('announcements');
-            const isAdmin = currentUser && (currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33');
+            const isAdmin = currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33';
             if (isAnnouncements && !isAdmin) {
-                return showAlert("Restricted Channel", "Only admins are permitted to post messages in announcements.");
+                return showAlert("Channel Restricted", "Only administrators are allowed to broadcast in the announcements channel.");
             }
 
             let text = msgInput.value.trim();
             if (!text && !selectedFile) return;
 
             if (replyTargetMsg) {
-                const encodedText = encodeURIComponent(replyTargetMsg.text);
-                text = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodedText}] ${text}`;
+                const encodedSnippet = encodeURIComponent(replyTargetMsg.text.substring(0, 60));
+                text = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodedSnippet}] ${text}`;
                 clearReplyTarget();
             }
 
-            // Silent shadowban prefix so non-admins never see messages from shadowbanned devices
-            if (isCurrentDeviceShadowbanned) {
+            // Silently tag shadowbanned users' messages so only they & admins see them
+            if (isCurrentDeviceShadowbanned && !text.startsWith('[SB]')) {
                 text = `[SB]${text}`;
             }
 
-            let mediaUrl = null;
+            let media_url = null;
             if (selectedFile) {
                 try {
-                    const fileExt = selectedFile.name.split('.').pop();
-                    const filePath = `uploads/${currentUser.id}_${Date.now()}.${fileExt}`;
-                    const { error } = await supabaseClient.storage.from('chat-media').upload(filePath, selectedFile);
-                    if (error) throw error;
+                    const fileExt = selectedFile.name.split('.').pop() || 'bin';
+                    const filePath = `${currentUser.id}/${Date.now()}_${Math.random().toString(36).substring(2, 6)}.${fileExt}`;
+                    
+                    const { error: uploadErr } = await supabaseClient.storage
+                        .from('chat-media')
+                        .upload(filePath, selectedFile);
 
-                    const { data: urlData } = supabaseClient.storage.from('chat-media').getPublicUrl(filePath);
-                    mediaUrl = urlData.publicUrl;
+                    if (!uploadErr) {
+                        const { data: publicUrlData } = supabaseClient.storage
+                            .from('chat-media')
+                            .getPublicUrl(filePath);
+                        media_url = publicUrlData.publicUrl;
+                    } else {
+                        if (selectedFile.size <= 35 * 1024 * 1024) {
+                            media_url = await fileToBase64(selectedFile);
+                        } else {
+                            showAlert("File Too Large", "Max fallback media size is 35MB.");
+                            return;
+                        }
+                    }
                 } catch (err) {
-                    mediaUrl = await fileToBase64(selectedFile);
+                    try {
+                        media_url = await fileToBase64(selectedFile);
+                    } catch (e) {}
                 }
             }
 
-            const { data: insertedData } = await supabaseClient.from('chat_messages').insert([{
-                user_id: currentUser.id,
-                username: currentUser.username,
-                channel_id: activeChannel,
-                message: text,
-                media_url: mediaUrl
-            }]).select();
-
             msgInput.value = '';
             mentionAutocomplete.classList.add('hidden');
+            const tempFile = selectedFile;
             selectedFile = null;
             mediaFileInput.value = '';
             filePreview.classList.add('hidden');
 
             touchUserLastActive();
-            saveLastReadTimestamp(activeChannel);
-            unreadCounts[activeChannel] = 0;
-            delete unreadFirstMsgId[activeChannel];
 
-            if (insertedData && insertedData[0]) {
+            const { data: insertedData, error } = await supabaseClient
+                .from('chat_messages')
+                .insert([{
+                    user_id: currentUser.id,
+                    username: currentUser.username,
+                    channel_id: activeChannel,
+                    message: text,
+                    media_url
+                }])
+                .select();
+
+            if (error) {
+                showToast("Send error: " + error.message, "error");
+                if (tempFile) {
+                    selectedFile = tempFile;
+                    filePreview.classList.remove('hidden');
+                }
+            } else if (insertedData && insertedData[0]) {
                 const insertedMsg = insertedData[0];
                 if (!knownMessageIds.has(insertedMsg.id)) {
                     knownMessageIds.add(insertedMsg.id);
                     await appendMessageUI(insertedMsg);
+                    saveLastReadTimestamp(activeChannel);
                 }
             }
         });
 
-        function listenToRealtimeMessages() {
-            supabaseClient.channel('public:chat_messages')
-                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, payload => {
-                    const msg = payload.new;
-                    if (msg.username === currentUser?.username) return;
-                    if (isMessageShadowbannedForViewer(msg)) return;
-                    if (!isUserMemberOfChannelOrDM(msg.channel_id)) return;
-
-                    if (msg.channel_id === activeChannel) {
-                        if (!knownMessageIds.has(msg.id)) {
-                            knownMessageIds.add(msg.id);
-                            appendMessageUI(msg);
-                        }
-                    } else {
-                        unreadCounts[msg.channel_id] = (unreadCounts[msg.channel_id] || 0) + 1;
-                        if (!unreadFirstMsgId[msg.channel_id]) unreadFirstMsgId[msg.channel_id] = msg.id;
-                        loadChannels();
-                        loadFriends();
-                        showToast(`New message in ${channelNamesMap.get(msg.channel_id) || msg.channel_id}`, "info");
-                    }
-                })
-                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages' }, payload => {
-                    const msg = payload.new;
-                    if (isMessageShadowbannedForViewer(msg)) return;
-                    if (msg.channel_id === activeChannel) {
-                        updateMessageUIContent(msg.id, msg.message, true);
-                    }
-                })
-                .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'chat_messages' }, payload => {
-                    if (payload.old && payload.old.id) {
-                        removeMessageUI(payload.old.id);
-                    }
-                })
-                .subscribe();
-        }
-
-        function updateUserDisplayUI() {
-            document.getElementById('current-user-display').textContent = currentUser.display_name || currentUser.username;
-            document.getElementById('current-user-status').textContent = currentUser.custom_status ? `💬 ${currentUser.custom_status}` : '';
-            if (currentUser.avatar_url) {
-                document.getElementById('user-avatar').innerHTML = `<img src="${currentUser.avatar_url}" class="w-full h-full object-cover rounded-full">`;
-            } else {
-                document.getElementById('user-avatar').textContent = (currentUser.display_name || currentUser.username).charAt(0).toUpperCase();
-            }
-        }
-
         function escapeHTML(str) {
-            return (str || '').replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
+            if (!str) return '';
+            return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
         }
 
-        window.addEventListener('DOMContentLoaded', async () => {
+        // ==========================================
+        // 17. BOOTSTRAP & INITIALIZATION
+        // ==========================================
+        (async function bootstrapApp() {
+            checkInviteLinkInUrl();
             setupPfpCropper();
             setupChatMentionAutocomplete();
             setupAdminTargetAutocomplete();
-            checkInviteLinkInUrl();
-            enumerateDevices();
-            updateChannelHeaderControls();
 
-            // Initialize hardware + storage device identity & verify ban status before anything else
             await initDeviceIdentity();
             const initialMod = await syncModerationStateFromServer();
-            if (!initialMod.banned) {
-                await checkSavedSession();
-            }
-        });
+            if (initialMod.banned) return;
+
+            await checkSavedSession();
+        })();
     </script>
 </body>
 </html>
