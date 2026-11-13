@@ -303,7 +303,7 @@
                         <h3 class="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-2">
                             <span>🧹</span> Maintenance & Cleanup
                         </h3>
-                        <p class="text-[11px] text-slate-400">Auto-deletes users inactive &gt;30 days automatically on startup, or run manually:</p>
+                        <p class="text-[11px] text-slate-400">Auto-deletes users inactive &gt;10 days automatically on startup, or run manually:</p>
                     </div>
                     <div class="space-y-2">
                         <button onclick="runInactiveUsersAutoCleanup(true)" class="w-full bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-bold py-2 rounded-lg transition-colors cursor-pointer border border-indigo-500/30">🗓️ Purge 30d+ Inactive Users</button>
@@ -814,7 +814,7 @@
         const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
         const APPEAL_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
-        const INACTIVE_DELETE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+        const INACTIVE_DELETE_MS = 10 * 24 * 60 * 60 * 1000; // 30 days
         const USERNAME_REGEX = /^[a-z0-9_.]+$/;
 
         let currentUser = null;
