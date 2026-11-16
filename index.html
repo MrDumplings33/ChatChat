@@ -381,8 +381,11 @@
             <div id="view-profile-avatar" class="w-20 h-20 rounded-full bg-indigo-600 mx-auto flex items-center justify-center text-xl font-bold overflow-hidden border border-slate-700">?</div>
             <div>
                 <h3 id="view-profile-dname" class="text-lg font-bold text-slate-100"></h3>
-                <p id="view-profile-uname" class="text-xs text-indigo-400"></p>
-                <p id="view-profile-status" class="text-xs text-indigo-300/80 mt-1 italic"></p>
+                <div class="flex items-center justify-center gap-1.5 flex-wrap mt-0.5">
+                    <p id="view-profile-uname" class="text-xs text-indigo-400"></p>
+                    <span id="view-profile-pronouns" class="hidden text-[10px] font-semibold text-purple-300 bg-purple-500/15 border border-purple-500/30 px-2 py-0.5 rounded-full"></span>
+                </div>
+                <p id="view-profile-status" class="text-xs text-indigo-300/80 mt-1.5 italic"></p>
             </div>
             <p id="view-profile-bio" class="text-xs text-slate-300 bg-slate-950 p-3 rounded-lg border border-slate-800 min-h-[60px] text-left break-words"></p>
             <button id="report-user-btn" class="w-full bg-slate-800 hover:bg-slate-700 text-xs font-bold py-2 rounded-lg transition-colors cursor-pointer text-rose-300">Report User</button>
@@ -392,7 +395,7 @@
 
     <!-- Edit Profile Modal -->
     <div id="profile-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
-        <div class="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl max-w-md w-full shadow-2xl space-y-4 animate-modal-in">
+        <div class="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl max-w-md w-full shadow-2xl space-y-4 animate-modal-in my-auto">
             <h2 class="text-xl font-bold text-slate-100">Edit Profile & Avatar</h2>
             
             <div class="flex flex-col items-center space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800">
@@ -417,6 +420,10 @@
                 <div>
                     <label class="text-xs font-bold text-slate-400 uppercase">Display Name</label>
                     <input type="text" id="edit-display-name" class="w-full mt-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
+                </div>
+                <div>
+                    <label class="text-xs font-bold text-slate-400 uppercase">Pronouns</label>
+                    <input type="text" id="edit-pronouns" placeholder="e.g. they/them, she/her, he/him, any..." class="w-full mt-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
                 </div>
                 <div>
                     <label class="text-xs font-bold text-slate-400 uppercase">Bio</label>
@@ -1652,6 +1659,34 @@
         // ==========================================
         // 7. @ USERNAME AUTO-PREDICT & DISPLAY NAME MENTIONS
         // ==========================================
+        function getSavedLocalPronouns(username) {
+            if (!username) return '';
+            try {
+                return localStorage.getItem(`mesh_pronouns_${username}`) || '';
+            } catch(e) {
+                return '';
+            }
+        }
+
+        function setSavedLocalPronouns(username, pronouns) {
+            if (!username) return;
+            try {
+                if (pronouns) localStorage.setItem(`mesh_pronouns_${username}`, pronouns);
+                else localStorage.removeItem(`mesh_pronouns_${username}`);
+            } catch(e) {}
+        }
+
+        function hydrateProfilePronouns(prof) {
+            if (!prof || !prof.username) return prof;
+            if (!prof.pronouns) {
+                const localP = getSavedLocalPronouns(prof.username);
+                if (localP) prof.pronouns = localP;
+            } else {
+                setSavedLocalPronouns(prof.username, prof.pronouns);
+            }
+            return prof;
+        }
+
         async function preloadAllUserProfiles(force = false) {
             if (!force && profilesSyncPromise) return profilesSyncPromise;
             if (!force && Date.now() - lastProfilesSyncTs < 4000 && userProfileCache.size > 0) return;
@@ -1663,6 +1698,7 @@
                         const validUsernames = new Set();
                         profiles.forEach(p => {
                             if (p && p.username && USERNAME_REGEX.test(p.username)) {
+                                hydrateProfilePronouns(p);
                                 userProfileCache.set(p.username, p);
                                 validUsernames.add(p.username);
                             }
@@ -4099,6 +4135,7 @@
 
             const profile = await fetchProfile(msg.username);
             const displayName = profile ? (profile.display_name || profile.username) : msg.username;
+            const pronouns = profile && profile.pronouns ? profile.pronouns : '';
             const avatarUrl = profile ? profile.avatar_url : null;
 
             let textContent = msg.message || '';
@@ -4194,6 +4231,10 @@
             const isAdmin = currentUser && (currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33');
             const canModify = isOwner || isAdmin;
 
+            const pronounsBadgeHTML = pronouns
+                ? `<span data-author-pronouns="${escapeHTML(msg.username)}" class="ml-1.5 px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 text-[10px] font-medium shrink-0">${escapeHTML(pronouns)}</span>`
+                : `<span data-author-pronouns="${escapeHTML(msg.username)}" class="hidden ml-1.5 px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 text-[10px] font-medium shrink-0"></span>`;
+
             const sbAdminBadge = (isAdmin && !isOwner && wasShadowbannedMsg)
                 ? `<span class="ml-2 px-1.5 py-0.5 rounded bg-purple-600/20 text-purple-300 border border-purple-500/30 text-[9px] font-bold">👻 SHADOWBANNED</span>`
                 : '';
@@ -4215,6 +4256,7 @@
                     <div class="flex justify-between items-center text-xs">
                         <div class="flex items-center min-w-0">
                             <span onclick="showUserProfile('${escapeHTML(msg.username)}')" class="font-bold text-slate-200 cursor-pointer hover:underline truncate">${escapeHTML(displayName)}</span>
+                            ${pronounsBadgeHTML}
                             ${sbAdminBadge}
                         </div>
                         <div class="flex items-center">
@@ -4241,6 +4283,7 @@
         // ==========================================
         document.getElementById('open-profile-btn').addEventListener('click', () => {
             document.getElementById('edit-display-name').value = currentUser.display_name || currentUser.username;
+            document.getElementById('edit-pronouns').value = currentUser.pronouns || getSavedLocalPronouns(currentUser.username) || '';
             document.getElementById('edit-bio').value = currentUser.bio || '';
             document.getElementById('edit-standing-select').value = preferredStanding;
             document.getElementById('edit-status-text').value = currentUser.custom_status || '';
@@ -4277,6 +4320,7 @@
 
         document.getElementById('save-profile-btn').addEventListener('click', async () => {
             const display_name = document.getElementById('edit-display-name').value.trim() || currentUser.username;
+            const pronouns = document.getElementById('edit-pronouns').value.trim();
             const bio = document.getElementById('edit-bio').value.trim();
             const standing = document.getElementById('edit-standing-select').value;
             const custom_status = document.getElementById('edit-status-text').value.trim();
@@ -4307,26 +4351,52 @@
                 }
             }
 
-            const { error } = await supabaseClient.from('profiles').update({
+            let { error } = await supabaseClient.from('profiles').update({
                 display_name,
+                pronouns,
                 bio,
                 standing,
                 custom_status,
                 avatar_url
             }).eq('id', currentUser.id);
 
+            // Graceful fallback if the Supabase `profiles` table does not have a `pronouns` column yet
+            if (error && error.message && error.message.toLowerCase().includes('pronouns')) {
+                const retry = await supabaseClient.from('profiles').update({
+                    display_name,
+                    bio,
+                    standing,
+                    custom_status,
+                    avatar_url
+                }).eq('id', currentUser.id);
+                error = retry.error;
+            }
+
             if (!error) {
                 currentUser.display_name = display_name;
+                currentUser.pronouns = pronouns;
                 currentUser.bio = bio;
                 currentUser.custom_status = custom_status;
                 currentUser.avatar_url = avatar_url;
                 currentUser.standing = standing;
                 preferredStanding = standing;
+                setSavedLocalPronouns(currentUser.username, pronouns);
                 userProfileCache.set(currentUser.username, currentUser);
 
                 // Immediately update any mentions of this user visible in chat
                 document.querySelectorAll(`[data-mention-username="${CSS.escape(currentUser.username)}"]`).forEach(el => {
                     el.textContent = `@${display_name}`;
+                });
+
+                // Immediately update any pronoun badges of this user visible in chat
+                document.querySelectorAll(`[data-author-pronouns="${CSS.escape(currentUser.username)}"]`).forEach(el => {
+                    if (pronouns) {
+                        el.textContent = pronouns;
+                        el.classList.remove('hidden');
+                    } else {
+                        el.textContent = '';
+                        el.classList.add('hidden');
+                    }
                 });
 
                 updateUserDisplayUI();
@@ -4363,6 +4433,7 @@
                 id: userId,
                 username,
                 display_name: username,
+                pronouns: '',
                 avatar_url: null,
                 bio: '',
                 standing: 'online',
@@ -4402,6 +4473,7 @@
             const modCheck = await syncModerationStateFromServer(profile.username);
             if (modCheck.banned) return;
 
+            hydrateProfilePronouns(profile);
             currentUser = profile;
             preferredStanding = profile.standing || 'online';
             manualStanding = (document.hidden && preferredStanding === 'online') ? 'idle' : preferredStanding;
@@ -4763,7 +4835,9 @@
         function updateUserDisplayUI() {
             if (!currentUser) return;
             document.getElementById('current-user-display').textContent = currentUser.display_name || currentUser.username;
-            document.getElementById('current-user-status').textContent = currentUser.custom_status || '';
+            const pronounsPart = currentUser.pronouns ? `(${currentUser.pronouns})` : '';
+            const statusPart = currentUser.custom_status || '';
+            document.getElementById('current-user-status').textContent = [pronounsPart, statusPart].filter(Boolean).join(' • ');
             const avatarEl = document.getElementById('user-avatar');
             if (currentUser.avatar_url) {
                 avatarEl.innerHTML = `<img src="${escapeHTML(currentUser.avatar_url)}" class="w-full h-full object-cover">`;
@@ -4778,6 +4852,7 @@
             if (userProfileCache.has(username)) return userProfileCache.get(username);
             const { data } = await supabaseClient.from('profiles').select('*').eq('username', username).maybeSingle();
             if (data) {
+                hydrateProfilePronouns(data);
                 userProfileCache.set(username, data);
                 allKnownUsers.add(username);
             }
@@ -4789,6 +4864,14 @@
             if (!prof) return;
             document.getElementById('view-profile-dname').textContent = prof.display_name || prof.username;
             document.getElementById('view-profile-uname').textContent = `@${prof.username}`;
+            const pronounsEl = document.getElementById('view-profile-pronouns');
+            if (prof.pronouns) {
+                pronounsEl.textContent = prof.pronouns;
+                pronounsEl.classList.remove('hidden');
+            } else {
+                pronounsEl.textContent = '';
+                pronounsEl.classList.add('hidden');
+            }
             document.getElementById('view-profile-status').textContent = prof.custom_status || '';
             document.getElementById('view-profile-bio').textContent = prof.bio || "No bio set.";
             const av = document.getElementById('view-profile-avatar');
@@ -4848,117 +4931,91 @@
                         const reqDiv = document.createElement('div');
                         reqDiv.className = "flex items-center justify-between text-xs bg-slate-950/70 p-2 rounded-lg border border-amber-500/30";
                         if (isSender) {
-                            reqDiv.innerHTML = `<span class="text-slate-300 font-medium truncate">Sent to <b>@${escapeHTML(other.username)}</b></span> <span class="text-[10px] text-amber-400">Pending</span>`;
+                            reqDiv.innerHTML = `<span class="text-slate-400 truncate">To: <b>${escapeHTML(other.display_name || other.username)}</b></span><span class="text-[10px] text-amber-400">Sent</span>`;
                         } else {
-                            reqDiv.innerHTML = `
-                                <span class="text-slate-200 font-semibold truncate">@${escapeHTML(other.username)}</span>
-                                <div class="flex gap-1 shrink-0">
-                                    <button onclick="acceptFriend('${f.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded font-bold cursor-pointer">Accept</button>
-                                    <button onclick="declineFriend('${f.id}')" class="bg-rose-600 hover:bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded font-bold cursor-pointer">Reject</button>
-                                </div>`;
+                            reqDiv.innerHTML = `<span class="text-slate-200 truncate">From: <b>${escapeHTML(other.display_name || other.username)}</b></span><button onclick="acceptFriend('${f.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer">Accept</button>`;
                         }
                         requestsList.appendChild(reqDiv);
                     } else if (f.status === 'accepted') {
                         acceptedCount++;
                         userFriends.add(other.username);
-                        const standing = onlineUsersMap.get(other.username) || 'offline';
-                        const dmId = getDMChannelID(currentUser.username, other.username);
-                        const unread = unreadCounts[dmId] || 0;
+                        const otherStanding = onlineUsersMap.get(other.username) || 'offline';
 
                         const div = document.createElement('div');
-                        div.className = "flex items-center justify-between text-xs bg-slate-950/40 p-1.5 rounded-lg border border-slate-800/50";
+                        div.className = "flex items-center justify-between text-xs bg-slate-950/60 p-1.5 rounded-lg border border-slate-800/80";
                         div.innerHTML = `
-                            <span onclick="showUserProfile('${escapeHTML(other.username)}')" class="text-slate-200 font-medium cursor-pointer hover:underline truncate flex items-center gap-1.5">
-                                ${renderStandingBadgeDot(standing)}
+                            <span onclick="showUserProfile('${escapeHTML(other.username)}')" class="truncate font-medium text-slate-200 cursor-pointer hover:underline flex items-center gap-1.5">
+                                ${renderStandingBadgeDot(otherStanding)}
                                 <span>${escapeHTML(other.display_name || other.username)}</span>
                             </span>
-                            <button onclick="openDM('${escapeHTML(other.username)}')" class="text-[10px] bg-slate-800 hover:bg-indigo-600 text-indigo-300 hover:text-white px-2 py-0.5 rounded transition-colors cursor-pointer shrink-0 flex items-center gap-1">
-                                <span>DM</span>
-                                ${unread > 0 ? `<span class="bg-rose-600 text-white text-[9px] font-black px-1.5 py-0.2 rounded-full">${unread}</span>` : ''}
-                            </button>`;
+                            <button onclick="openDM('${escapeHTML(other.username)}')" class="bg-indigo-600/30 hover:bg-indigo-600 text-indigo-300 hover:text-white px-2 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer">DM</button>
+                        `;
                         friendsList.appendChild(div);
 
+                        const dmChannelId = getDMChannelID(currentUser.username, other.username);
+                        const dmUnread = unreadCounts[dmChannelId] || 0;
+                        const unreadBadge = dmUnread > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full ml-1 shadow">${dmUnread}</span>` : '';
+
                         const dmBtn = document.createElement('button');
-                        const isActiveDM = activeChannel === dmId;
-                        dmBtn.className = isActiveDM
-                            ? "w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-between gap-2 cursor-pointer"
-                            : "w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors flex items-center justify-between gap-2 cursor-pointer";
+                        dmBtn.className = `channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center justify-between cursor-pointer ${activeChannel === dmChannelId ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`;
                         dmBtn.innerHTML = `
-                            <div class="flex items-center gap-2 truncate">
-                                ${renderStandingBadgeDot(standing)}
+                            <span class="flex items-center gap-2 truncate">
+                                ${renderStandingBadgeDot(otherStanding)}
                                 <span class="truncate">@ ${escapeHTML(other.display_name || other.username)}</span>
-                            </div>
-                            ${unread > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full shadow-lg shrink-0">${unread}</span>` : ''}
+                            </span>
+                            ${unreadBadge}
                         `;
-                        dmBtn.onclick = () => openDM(other.username);
+                        dmBtn.onclick = () => switchChannel(dmChannelId, `@ ${other.display_name || other.username}`);
                         dmList.appendChild(dmBtn);
                     }
                 });
             }
 
-            if (pendingCount === 0) requestsList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No pending requests</p>';
-            if (acceptedCount === 0) dmList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No active DMs</p>';
+            if (pendingCount === 0) requestsList.innerHTML = `<p class="text-[11px] text-slate-500 italic px-2">No pending requests</p>`;
+            if (acceptedCount === 0) {
+                friendsList.innerHTML = `<p class="text-[11px] text-slate-500 italic px-1">No friends yet</p>`;
+                dmList.innerHTML = `<p class="text-[11px] text-slate-500 italic px-2">No active DMs</p>`;
+            }
 
-            checkAnnouncementsPermissions();
+            // Re-evaluate DM input lock if currently viewing a DM
+            if (activeChannel.startsWith('dm_')) {
+                checkAnnouncementsPermissions();
+            }
         }
 
-        async function acceptFriend(id) {
-            await supabaseClient.from('friends').update({ status: 'accepted' }).eq('id', id);
-            loadFriends();
+        async function acceptFriend(friendshipId) {
+            await supabaseClient.from('friends').update({ status: 'accepted' }).eq('id', friendshipId);
+            await loadFriends();
             showToast("Friend request accepted!", "success");
-        }
-
-        async function declineFriend(id) {
-            await supabaseClient.from('friends').delete().eq('id', id);
-            loadFriends();
-            showToast("Friend request rejected", "info");
         }
 
         function getDMChannelID(u1, u2) {
             return 'dm_' + [u1, u2].sort().join('||');
         }
 
-        async function openDM(targetUsername) {
-            if (!userFriends.has(targetUsername)) {
-                return showAlert("Friends Only", "You can only open Direct Messages with accepted friends.");
+        function openDM(friendUsername) {
+            if (!userFriends.has(friendUsername)) {
+                return showAlert("Friends Only", "You can only Direct Message accepted friends.");
             }
-            const dmId = getDMChannelID(currentUser.username, targetUsername);
-            activeChannel = dmId;
-            const prof = userProfileCache.get(targetUsername);
-            document.getElementById('active-channel-title').textContent = `@ ${prof ? (prof.display_name || targetUsername) : targetUsername}`;
-
-            saveLastReadTimestamp(dmId);
-            unreadCounts[dmId] = 0;
-
-            loadChannels();
-            loadFriends();
-            updateChannelHeaderControls();
-            await loadChannelMessages();
+            const dmId = getDMChannelID(currentUser.username, friendUsername);
+            const prof = userProfileCache.get(friendUsername);
+            const displayLabel = `@ ${prof ? (prof.display_name || friendUsername) : friendUsername}`;
+            switchChannel(dmId, displayLabel);
         }
 
-        // ==========================================
-        // 16. PRIVATE CHANNELS & REALTIME MESSAGES
-        // ==========================================
         async function createNewChannel() {
-            const name = await showPrompt("Create Private Channel", "Enter a name for your new private channel:", "e.g. study-group", "Create Channel");
+            const name = await showPrompt("Create Private Channel", "Enter a name for your new private channel:", "e.g. gaming-lounge", "Create Channel");
             if (!name) return;
-            const slug = name.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-');
-            if (!slug) return;
-            const label = `# ${slug}`;
-
-            customChannelsSet.add(slug);
-            channelNamesMap.set(slug, label);
-            saveUserJoinedChannels();
-            activeChannel = slug;
-            document.getElementById('active-channel-title').textContent = label;
+            const cleanId = name.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + Math.floor(1000 + Math.random() * 9000);
+            const fullDisplay = `# ${name.trim()}`;
             
-            saveLastReadTimestamp(slug);
-            unreadCounts[slug] = 0;
-
+            customChannelsSet.add(cleanId);
+            channelNamesMap.set(cleanId, fullDisplay);
+            saveUserJoinedChannels();
+            
             loadChannels();
-            updateChannelHeaderControls();
-            loadChannelMessages();
-            showToast(`Private channel ${label} created! Use Invite to add friends.`, "success");
+            switchChannel(cleanId, fullDisplay);
+            showToast(`Private channel ${fullDisplay} created! Invite friends to grant access.`, "success");
         }
 
         function loadChannels() {
@@ -4968,41 +5025,21 @@
 
             customChannelsSet.forEach(cid => {
                 const cname = channelNamesMap.get(cid) || `# ${cid}`;
+                const isSelected = activeChannel === cid;
+                const unreadCount = unreadCounts[cid] || 0;
+                const unreadBadge = unreadCount > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full shadow">${unreadCount}</span>` : '';
+
                 const btn = document.createElement('button');
-                const isActive = activeChannel === cid;
-                const unread = unreadCounts[cid] || 0;
-
-                btn.className = isActive
-                    ? "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-between cursor-pointer"
-                    : "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors flex items-center justify-between cursor-pointer";
-                
-                btn.dataset.channel = cid;
-                btn.dataset.name = cname;
-
-                btn.innerHTML = `
-                    <span class="truncate">${escapeHTML(cname)}</span>
-                    ${unread > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full shadow-lg shrink-0">${unread}</span>` : ''}
-                `;
-                
-                btn.onclick = () => {
-                    activeChannel = cid;
-                    document.getElementById('active-channel-title').textContent = cname;
-                    
-                    saveLastReadTimestamp(cid);
-                    unreadCounts[cid] = 0;
-
-                    loadChannels();
-                    loadFriends();
-                    updateChannelHeaderControls();
-                    loadChannelMessages();
-                };
+                btn.className = `channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center justify-between cursor-pointer ${isSelected ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`;
+                btn.innerHTML = `<span class="truncate">${escapeHTML(cname)}</span>${unreadBadge}`;
+                btn.onclick = () => switchChannel(cid, cname);
 
                 btn.oncontextmenu = (e) => {
                     e.preventDefault();
                     contextChannelId = cid;
                     contextChannelName = cname;
-                    contextMenu.style.top = `${e.clientY}px`;
                     contextMenu.style.left = `${e.clientX}px`;
+                    contextMenu.style.top = `${e.clientY}px`;
                     contextMenu.classList.remove('hidden');
                 };
 
@@ -5010,43 +5047,69 @@
             });
         }
 
+        function switchChannel(channelId, displayTitle) {
+            if (!isUserMemberOfChannelOrDM(channelId)) {
+                return showToast("You do not have access to this private channel.", "error");
+            }
+
+            if (activeChannel) {
+                saveLastReadTimestamp(activeChannel);
+            }
+
+            activeChannel = channelId;
+            document.getElementById('active-channel-title').textContent = displayTitle || channelNamesMap.get(channelId) || `# ${channelId}`;
+            
+            loadChannels();
+            loadFriends();
+            updateChannelHeaderControls();
+            checkAnnouncementsPermissions();
+            loadChannelMessages();
+        }
+
+        // ==========================================
+        // 16. CHAT MESSAGING & REALTIME SYNC
+        // ==========================================
         async function loadChannelMessages() {
-            if (!isUserMemberOfChannelOrDM(activeChannel)) {
-                chatBox.innerHTML = `<div class="p-8 text-center text-xs text-slate-500">🔒 You are not a member of this private channel.</div>`;
+            knownMessageIds.clear();
+            const currentChan = activeChannel;
+            
+            if (!isUserMemberOfChannelOrDM(currentChan)) {
+                chatBox.innerHTML = '<div class="flex flex-col items-center justify-center h-full text-slate-500 text-xs gap-2"><span>🔒 Private Channel</span><p>You must receive an invite link to view this channel.</p></div>';
                 return;
             }
 
-            const { data: messages, error } = await supabaseClient
+            const { data: messages } = await supabaseClient
                 .from('chat_messages')
                 .select('*')
-                .eq('channel_id', activeChannel)
+                .eq('channel_id', currentChan)
                 .order('created_at', { ascending: true })
-                .limit(100);
+                .limit(200);
 
-            if (!error && messages) {
-                chatBox.innerHTML = '';
-                knownMessageIds.clear();
-                for (const m of messages) {
-                    knownMessageIds.add(m.id);
-                    await appendMessageUI(m);
-                }
+            if (activeChannel !== currentChan) return;
 
-                if (!unreadFirstMsgId[activeChannel]) {
-                    chatBox.scrollTop = chatBox.scrollHeight;
-                    saveLastReadTimestamp(activeChannel);
-                } else {
-                    const divider = document.getElementById('new-messages-divider');
-                    if (divider) divider.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            chatBox.innerHTML = '';
+            if (messages && messages.length > 0) {
+                for (const msg of messages) {
+                    if (!knownMessageIds.has(msg.id)) {
+                        knownMessageIds.add(msg.id);
+                        await appendMessageUI(msg);
+                    }
                 }
+            }
+
+            if (!unreadFirstMsgId[currentChan]) {
+                chatBox.scrollTop = chatBox.scrollHeight;
+                clearUnreadForActiveChannel();
+            } else {
+                const divider = document.getElementById('new-messages-divider');
+                if (divider) divider.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
         }
 
         function startFastPolling() {
             if (fastPollingInterval) clearInterval(fastPollingInterval);
             fastPollingInterval = setInterval(async () => {
-                if (!currentUser) return;
-                if (!isUserMemberOfChannelOrDM(activeChannel)) return;
-
+                if (!currentUser || !activeChannel || !isUserMemberOfChannelOrDM(activeChannel)) return;
                 const { data: messages } = await supabaseClient
                     .from('chat_messages')
                     .select('*')
@@ -5055,12 +5118,11 @@
                     .limit(15);
 
                 if (messages) {
-                    const reversed = messages.reverse();
+                    const reversed = [...messages].reverse();
                     for (const msg of reversed) {
                         if (!knownMessageIds.has(msg.id)) {
                             knownMessageIds.add(msg.id);
                             await appendMessageUI(msg);
-                            saveLastReadTimestamp(activeChannel);
                         }
                     }
                 }
@@ -5068,31 +5130,32 @@
         }
 
         function listenToRealtimeMessages() {
-            supabaseClient
-                .channel('public:chat_messages')
+            supabaseClient.channel('chat-updates')
                 .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, async (payload) => {
                     const msg = payload.new;
+                    if (!msg) return;
+
                     if (isMessageShadowbannedForViewer(msg)) return;
 
                     if (msg.channel_id === activeChannel) {
                         if (!knownMessageIds.has(msg.id)) {
                             knownMessageIds.add(msg.id);
                             await appendMessageUI(msg);
-                            saveLastReadTimestamp(activeChannel);
-                        }
-                    } else if (isUserMemberOfChannelOrDM(msg.channel_id)) {
-                        if (msg.username !== currentUser?.username) {
-                            unreadCounts[msg.channel_id] = (unreadCounts[msg.channel_id] || 0) + 1;
-                            if (!unreadFirstMsgId[msg.channel_id]) {
-                                unreadFirstMsgId[msg.channel_id] = msg.id;
+                            const threshold = chatBox.scrollHeight - chatBox.clientHeight - 150;
+                            if (chatBox.scrollTop >= threshold) {
+                                saveLastReadTimestamp(activeChannel);
                             }
-                            loadChannels();
-                            loadFriends();
                         }
+                    } else if (isUserMemberOfChannelOrDM(msg.channel_id) && msg.username !== currentUser?.username) {
+                        unreadCounts[msg.channel_id] = (unreadCounts[msg.channel_id] || 0) + 1;
+                        if (!unreadFirstMsgId[msg.channel_id]) unreadFirstMsgId[msg.channel_id] = msg.id;
+                        loadChannels();
+                        loadFriends();
                     }
                 })
                 .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages' }, async (payload) => {
                     const msg = payload.new;
+                    if (!msg) return;
                     if (msg.channel_id === activeChannel) {
                         await updateMessageUIContent(msg.id, msg.message, true);
                     }
@@ -5105,148 +5168,101 @@
                     }
                 })
                 .subscribe();
-
-            // Keep userProfileCache and mention auto-predict synced in real time with the profiles table
-            supabaseClient
-                .channel('public:profiles')
-                .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, (payload) => {
-                    if (payload.eventType === 'DELETE' && payload.old) {
-                        const oldUname = payload.old.username;
-                        if (oldUname) {
-                            userProfileCache.delete(oldUname);
-                            allKnownUsers.delete(oldUname);
-                        }
-                    } else if (payload.new && payload.new.username && USERNAME_REGEX.test(payload.new.username)) {
-                        userProfileCache.set(payload.new.username, payload.new);
-                        allKnownUsers.add(payload.new.username);
-                        document.querySelectorAll(`[data-mention-username="${CSS.escape(payload.new.username)}"]`).forEach(el => {
-                            el.textContent = `@${payload.new.display_name || payload.new.username}`;
-                        });
-                    }
-                })
-                .subscribe();
         }
 
         document.getElementById('chat-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            if (!currentUser) return;
+            if (!currentUser || !isUserMemberOfChannelOrDM(activeChannel)) return;
 
             if (getActiveSelfTimeout()) {
-                return showAlert("Timed Out", "You cannot send messages while timed out.");
+                return showToast("You cannot send messages while timed out.", "error");
             }
 
             if (activeChannel.startsWith('dm_')) {
                 const dmPeer = getDMTargetUsername(activeChannel);
                 if (dmPeer && !userFriends.has(dmPeer)) {
-                    return showAlert("Friends Only", "You can only send Direct Messages to accepted friends.");
+                    return showToast("You must be accepted friends to send DMs.", "error");
                 }
             }
 
             const isAnnouncements = activeChannel === 'announcements' || (channelNamesMap.get(activeChannel) || '').toLowerCase().includes('announcements');
-            const isAdmin = currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33';
+            const isAdmin = currentUser && (currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33');
             if (isAnnouncements && !isAdmin) {
-                return showAlert("Channel Restricted", "Only administrators are allowed to broadcast in the announcements channel.");
+                return showToast("Only admins can post in announcements.", "error");
             }
 
-            let text = msgInput.value.trim();
-            if (!text && !selectedFile) return;
+            let messageText = msgInput.value.trim();
+            if (!messageText && !selectedFile) return;
 
             if (replyTargetMsg) {
-                const encodedSnippet = encodeURIComponent(replyTargetMsg.text.substring(0, 60));
-                text = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodedSnippet}] ${text}`;
-                clearReplyTarget();
+                const encodedSnippet = encodeURIComponent(replyTargetMsg.text.substring(0, 80));
+                messageText = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodedSnippet}] ${messageText}`;
             }
 
-            // Silently tag shadowbanned users' messages so only they & admins see them
-            if (isCurrentDeviceShadowbanned && !text.startsWith('[SB]')) {
-                text = `[SB]${text}`;
+            // Silently tag shadowbanned messages so only the sender & admins see them
+            if (isCurrentDeviceShadowbanned && !messageText.startsWith('[SB]')) {
+                messageText = `[SB]${messageText}`;
             }
 
-            let media_url = null;
-            if (selectedFile) {
-                try {
-                    const fileExt = selectedFile.name.split('.').pop() || 'bin';
-                    const filePath = `${currentUser.id}/${Date.now()}_${Math.random().toString(36).substring(2, 6)}.${fileExt}`;
-                    
-                    const { error: uploadErr } = await supabaseClient.storage
-                        .from('chat-media')
-                        .upload(filePath, selectedFile);
-
-                    if (!uploadErr) {
-                        const { data: publicUrlData } = supabaseClient.storage
-                            .from('chat-media')
-                            .getPublicUrl(filePath);
-                        media_url = publicUrlData.publicUrl;
-                    } else {
-                        if (selectedFile.size <= 35 * 1024 * 1024) {
-                            media_url = await fileToBase64(selectedFile);
-                        } else {
-                            showAlert("File Too Large", "Max fallback media size is 35MB.");
-                            return;
-                        }
-                    }
-                } catch (err) {
-                    try {
-                        media_url = await fileToBase64(selectedFile);
-                    } catch (e) {}
-                }
-            }
-
+            const fileToUpload = selectedFile;
             msgInput.value = '';
-            mentionAutocomplete.classList.add('hidden');
-            const tempFile = selectedFile;
+            clearReplyTarget();
             selectedFile = null;
             mediaFileInput.value = '';
             filePreview.classList.add('hidden');
+            mentionAutocomplete.classList.add('hidden');
 
-            touchUserLastActive();
+            let media_url = null;
+            if (fileToUpload) {
+                const fileExt = fileToUpload.name.split('.').pop();
+                const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
+                const { error: uploadError } = await supabaseClient.storage.from('chat-media').upload(fileName, fileToUpload);
 
-            const { data: insertedData, error } = await supabaseClient
-                .from('chat_messages')
-                .insert([{
-                    user_id: currentUser.id,
-                    username: currentUser.username,
-                    channel_id: activeChannel,
-                    message: text,
-                    media_url
-                }])
-                .select();
-
-            if (error) {
-                showToast("Send error: " + error.message, "error");
-                if (tempFile) {
-                    selectedFile = tempFile;
-                    filePreview.classList.remove('hidden');
+                if (uploadError) {
+                    if (fileToUpload.size <= 3.5 * 1024 * 1024) {
+                        media_url = await fileToBase64(fileToUpload);
+                    } else {
+                        return showAlert("Upload Error", "File exceeds 3.5 MB fallback limit.");
+                    }
+                } else {
+                    const { data: urlData } = supabaseClient.storage.from('chat-media').getPublicUrl(fileName);
+                    media_url = urlData.publicUrl;
                 }
-            } else if (insertedData && insertedData[0]) {
-                const insertedMsg = insertedData[0];
-                if (!knownMessageIds.has(insertedMsg.id)) {
-                    knownMessageIds.add(insertedMsg.id);
-                    await appendMessageUI(insertedMsg);
-                    saveLastReadTimestamp(activeChannel);
-                }
+            }
+
+            const { data: insertedMsg, error } = await supabaseClient.from('chat_messages').insert([{
+                user_id: currentUser.id,
+                username: currentUser.username,
+                channel_id: activeChannel,
+                message: messageText,
+                media_url
+            }]).select().single();
+
+            if (!error && insertedMsg) {
+                knownMessageIds.add(insertedMsg.id);
+                await appendMessageUI(insertedMsg);
+                saveLastReadTimestamp(activeChannel);
+                touchUserLastActive();
             }
         });
 
         function escapeHTML(str) {
-            if (!str) return '';
-            return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
+            return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
         }
 
         // ==========================================
-        // 17. BOOTSTRAP & INITIALIZATION
+        // 17. INITIALIZATION SEQUENCE
         // ==========================================
-        (async function bootstrapApp() {
-            checkInviteLinkInUrl();
+        (async function bootstrapMeshChat() {
             setupPfpCropper();
             setupChatMentionAutocomplete();
             setupAdminTargetAutocomplete();
-
+            checkInviteLinkInUrl();
             await initDeviceIdentity();
-            const initialMod = await syncModerationStateFromServer();
-            if (initialMod.banned) return;
-
-            await checkSavedSession();
+            const preAuthMod = await syncModerationStateFromServer(null);
+            if (!preAuthMod.banned) {
+                await checkSavedSession();
+            }
         })();
     </script>
 </body>
