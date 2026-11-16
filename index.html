@@ -803,9 +803,7 @@
 
     <script>
         // --- BACKEND CONFIGURATION ---
-        const SERVER_ORIGIN = window.location.protocol === 'http:'
-            ? "https://mesh-chat-local.duckdns.org:3000"
-            : "http://mesh-chat-local.duckdns.org:3000";
+        const SERVER_ORIGIN = "https://mesh-chat-local.duckdns.org";
 
         let authToken = localStorage.getItem('mesh_auth_token') || null;
         const socket = io(SERVER_ORIGIN, { autoConnect: true });
