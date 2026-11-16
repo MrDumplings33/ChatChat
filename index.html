@@ -69,10 +69,8 @@
 </head>
 <body class="bg-slate-950 text-slate-100 h-screen w-screen flex flex-col md:flex-row font-sans overflow-hidden antialiased select-none">
 
-    <!-- Toast Notifications -->
     <div id="toast-container" class="fixed top-4 right-4 z-[80] flex flex-col gap-2 pointer-events-none"></div>
 
-    <!-- Universal In-App Dialog / Confirm / Prompt Modal (Replaces ALL native JS popups) -->
     <div id="custom-dialog-modal" class="hidden fixed inset-0 z-[90] bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-700/80 p-6 rounded-2xl max-w-sm w-full shadow-2xl space-y-4 animate-modal-in">
             <div class="flex items-center justify-between">
@@ -90,7 +88,6 @@
         </div>
     </div>
 
-    <!-- Full-Screen Device Ban Lockout & 24-Hour Appeal Modal -->
     <div id="device-banned-modal" class="hidden fixed inset-0 z-[100] bg-slate-950/98 backdrop-blur-xl flex items-center justify-center p-4 overflow-y-auto">
         <div class="bg-slate-900 border-2 border-rose-500/60 p-6 sm:p-8 rounded-3xl max-w-lg w-full shadow-2xl shadow-rose-950/50 space-y-5 animate-modal-in">
             <div class="flex items-center gap-3 border-b border-slate-800 pb-4">
@@ -135,7 +132,6 @@
 
     <input type="file" id="pfp-upload-input" class="hidden" accept="image/*">
 
-    <!-- Channel Context Menu -->
     <div id="channel-context-menu" class="hidden fixed z-50 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-1.5 text-xs w-52 animate-modal-in">
         <button id="context-invite-btn" onclick="openChannelInviteModalFromContext()" class="w-full text-left px-3 py-2 hover:bg-indigo-600 hover:text-white rounded-lg transition-colors cursor-pointer font-medium flex items-center gap-2">
             <span>📨</span> Invite Friends to Channel
@@ -145,7 +141,6 @@
         </button>
     </div>
 
-    <!-- Invite Friends Modal (Friends-Only Enforced) -->
     <div id="invite-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-sm w-full shadow-2xl space-y-4 animate-modal-in">
             <div class="flex items-center justify-between border-b border-slate-800 pb-2">
@@ -181,7 +176,6 @@
         </div>
     </div>
 
-    <!-- Admin Command Panel Modal -->
     <div id="admin-panel-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-indigo-500/50 p-6 rounded-2xl max-w-2xl w-full shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto animate-modal-in">
             <div class="flex justify-between items-center border-b border-slate-800 pb-3">
@@ -191,8 +185,7 @@
                 </div>
                 <button onclick="document.getElementById('admin-panel-modal').classList.add('hidden')" class="text-slate-500 hover:text-slate-300 font-bold text-lg cursor-pointer">&times;</button>
             </div>
-            
-            <!-- Live Stats -->
+
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 text-center">
                     <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Total Users</span>
@@ -212,7 +205,6 @@
                 </div>
             </div>
 
-            <!-- User & Device Moderation -->
             <div class="bg-slate-950 p-4 rounded-xl border border-slate-800/80 space-y-3 relative">
                 <h3 class="text-xs font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-2">
                     <span>🛡️</span> User, Timeout & Device Moderation
@@ -230,7 +222,6 @@
                         <button onclick="deleteTargetAccount()" class="bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold py-2 rounded-lg transition-colors cursor-pointer">🗑️ Delete User</button>
                     </div>
 
-                    <!-- Device Ban & Device Shadowban Controls -->
                     <div class="pt-2 border-t border-slate-800/80 space-y-2">
                         <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Hardware & Device Enforcement</span>
                         <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -241,7 +232,6 @@
                         </div>
                     </div>
 
-                    <!-- Timed Timeout Controls -->
                     <div class="pt-2 border-t border-slate-800/80 space-y-2">
                         <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Timed Mute / Timeout</span>
                         <div class="flex flex-col sm:flex-row gap-2">
@@ -266,7 +256,6 @@
                 </div>
             </div>
 
-            <!-- Active Device Bans, Shadowbans & Timeouts Overview -->
             <div class="bg-slate-950 p-4 rounded-xl border border-slate-800/80 space-y-2">
                 <div class="flex justify-between items-center">
                     <h3 class="text-xs font-bold text-purple-300 uppercase tracking-wider">🔒 Active Bans, Shadowbans & Timeouts</h3>
@@ -277,7 +266,6 @@
                 </div>
             </div>
 
-            <!-- Ban Appeals Queue -->
             <div class="bg-slate-950 p-4 rounded-xl border border-slate-800/80 space-y-2">
                 <div class="flex justify-between items-center">
                     <h3 class="text-xs font-bold text-amber-400 uppercase tracking-wider">📨 Device Ban Appeals</h3>
@@ -288,7 +276,6 @@
                 </div>
             </div>
 
-            <!-- Global System Announcement & Maintenance -->
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div class="bg-slate-950 p-4 rounded-xl border border-slate-800/80 space-y-2.5">
                     <h3 class="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-2">
@@ -312,7 +299,6 @@
                 </div>
             </div>
 
-            <!-- User Reports -->
             <div class="space-y-2 border-t border-slate-800 pt-3">
                 <div class="flex justify-between items-center">
                     <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Incoming User Reports</h3>
@@ -325,7 +311,6 @@
         </div>
     </div>
 
-    <!-- Report Modal -->
     <div id="report-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-sm w-full shadow-2xl space-y-4 animate-modal-in">
             <h3 class="text-sm font-bold text-slate-100">Report Content or User</h3>
@@ -337,7 +322,6 @@
         </div>
     </div>
 
-    <!-- User Directory Modal -->
     <div id="presence-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-md w-full shadow-2xl space-y-4 max-h-[80vh] flex flex-col animate-modal-in">
             <div class="flex justify-between items-center border-b border-slate-800 pb-3">
@@ -357,7 +341,6 @@
         </div>
     </div>
 
-    <!-- Incoming Call Modal -->
     <div id="incoming-call-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-indigo-500 p-6 rounded-2xl max-w-sm w-full shadow-2xl space-y-4 text-center animate-modal-in">
             <div class="w-16 h-16 rounded-full bg-gradient-to-tr from-indigo-600 to-violet-500 mx-auto flex items-center justify-center text-2xl font-bold animate-pulse text-white shadow-lg shadow-indigo-500/30">
@@ -375,9 +358,8 @@
         </div>
     </div>
 
-    <!-- View Profile Modal -->
     <div id="view-profile-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
-        <div class="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl max-w-sm w-full shadow-2xl space-y-4 text-center animate-modal-in">
+        <div id="view-profile-card" class="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl max-w-sm w-full shadow-2xl space-y-4 text-center animate-modal-in bg-cover bg-center">
             <div id="view-profile-avatar" class="w-20 h-20 rounded-full bg-indigo-600 mx-auto flex items-center justify-center text-xl font-bold overflow-hidden border border-slate-700">?</div>
             <div>
                 <h3 id="view-profile-dname" class="text-lg font-bold text-slate-100"></h3>
@@ -393,7 +375,6 @@
         </div>
     </div>
 
-    <!-- Edit Profile Modal -->
     <div id="profile-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
         <div class="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl max-w-md w-full shadow-2xl space-y-4 animate-modal-in my-auto">
             <h2 class="text-xl font-bold text-slate-100">Edit Profile & Avatar</h2>
@@ -416,6 +397,21 @@
                 </div>
             </div>
 
+            <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs font-bold text-slate-300 uppercase">Message Background Image</label>
+                    <input type="file" id="message-background-input" accept="image/*" class="block w-full text-xs text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-600 file:px-3 file:py-2 file:text-xs file:font-bold file:text-white">
+                    <div class="flex items-center gap-3"><label for="message-background-size" class="text-[10px] text-slate-400 shrink-0">Image size</label><input type="range" id="message-background-size" min="50" max="200" value="100" class="w-full accent-indigo-500"><span id="message-background-size-value" class="text-[10px] text-indigo-300 w-12 text-right">100%</span></div>
+                    <button type="button" id="clear-message-background" class="text-[10px] text-rose-300 hover:text-rose-200">Remove message background</button>
+                </div>
+                <div class="border-t border-slate-800 pt-3 space-y-2">
+                    <label class="text-xs font-bold text-slate-300 uppercase">Profile Background Image</label>
+                    <input type="file" id="profile-background-input" accept="image/*" class="block w-full text-xs text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-600 file:px-3 file:py-2 file:text-xs file:font-bold file:text-white">
+                    <div class="flex items-center gap-3"><label for="profile-background-size" class="text-[10px] text-slate-400 shrink-0">Image size</label><input type="range" id="profile-background-size" min="50" max="200" value="100" class="w-full accent-indigo-500"><span id="profile-background-size-value" class="text-[10px] text-indigo-300 w-12 text-right">100%</span></div>
+                    <button type="button" id="clear-profile-background" class="text-[10px] text-rose-300 hover:text-rose-200">Remove profile background</button>
+                </div>
+                <p class="text-[10px] text-slate-500">Choose images and adjust their scale. Changes appear on your messages and public profile.</p>
+            </div>
             <div class="space-y-3">
                 <div>
                     <label class="text-xs font-bold text-slate-400 uppercase">Display Name</label>
@@ -450,7 +446,6 @@
         </div>
     </div>
 
-    <!-- Device Settings Modal -->
     <div id="device-settings-modal" class="hidden fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-md w-full shadow-2xl space-y-5 animate-modal-in">
             <div class="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -495,7 +490,6 @@
         </div>
     </div>
 
-    <!-- Screen Share Popup Modal -->
     <div id="screenshare-popup-modal" class="hidden fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
         <div id="screenshare-popup-container" class="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden max-w-[92vw] max-h-[85vh] transition-all duration-200">
             <div class="px-4 py-3 glass-panel border-b border-slate-800 flex items-center justify-between shrink-0">
@@ -525,7 +519,6 @@
         </div>
     </div>
 
-    <!-- Full-Screen Video Call Stage (With Back to Chat Minimize Support) -->
     <div id="video-call-stage" class="hidden fixed inset-0 z-40 bg-slate-950 flex flex-col overflow-hidden">
         <header class="h-16 px-4 md:px-6 flex items-center justify-between glass-panel z-20 shrink-0">
             <div class="flex items-center gap-3">
@@ -600,7 +593,6 @@
         </div>
     </div>
 
-    <!-- Floating Mini-PiP Window when Call is Minimized -->
     <div id="minimized-call-pip" class="hidden fixed bottom-20 right-4 z-30 w-56 bg-slate-900/95 backdrop-blur-xl border border-emerald-500/50 rounded-2xl shadow-2xl overflow-hidden animate-modal-in">
         <div onclick="restoreCallFromMinimized()" class="relative h-32 bg-slate-950 cursor-pointer group flex items-center justify-center overflow-hidden">
             <video id="minimized-pip-video" autoplay playsinline muted class="w-full h-full object-cover video-mirror"></video>
@@ -622,7 +614,6 @@
         </div>
     </div>
 
-    <!-- Auth Modal -->
     <div id="auth-modal" class="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 p-6 sm:p-8 rounded-2xl max-w-md w-full shadow-2xl space-y-5 animate-modal-in">
             <div class="text-center">
@@ -649,7 +640,6 @@
         </div>
     </div>
 
-    <!-- Left Navigation Sidebar -->
     <aside class="w-full md:w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between shrink-0 h-52 md:h-full">
         <div class="p-4 space-y-4 overflow-y-auto flex-1">
             <div class="flex items-center justify-between">
@@ -700,7 +690,6 @@
             </div>
         </div>
 
-        <!-- Docked Active Call Bar (Shown when in a call and minimized to chat) -->
         <div id="minimized-call-dock" class="hidden px-3 py-2.5 bg-emerald-950/70 border-t border-emerald-500/40 flex items-center justify-between gap-2 shrink-0">
             <div onclick="restoreCallFromMinimized()" class="min-w-0 cursor-pointer flex-1">
                 <div class="flex items-center gap-1.5">
@@ -715,7 +704,6 @@
             </div>
         </div>
 
-        <!-- User Profile Footer -->
         <div class="p-3 border-t border-slate-800 flex items-center justify-between shrink-0 bg-slate-950/40">
             <div class="flex items-center gap-2 min-w-0">
                 <div onclick="document.getElementById('open-profile-btn').click()" class="relative group cursor-pointer shrink-0" title="Edit Profile & Avatar">
@@ -730,7 +718,6 @@
         </div>
     </aside>
 
-    <!-- Main Chat Area -->
     <main class="flex-1 flex flex-col bg-slate-950 min-w-0 overflow-hidden h-full">
         <header class="p-3 sm:p-4 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between shrink-0 gap-2">
             <div class="flex items-center gap-2 min-w-0">
@@ -781,7 +768,6 @@
 
         <div id="typing-indicator" class="hidden px-4 py-1 text-[11px] text-indigo-300/80 italic shrink-0"></div>
 
-        <!-- Active Timeout Banner -->
         <div id="timeout-banner" class="hidden bg-amber-950/80 border-t border-amber-500/40 px-4 py-2.5 flex items-center justify-between text-xs text-amber-200 shrink-0 gap-2">
             <div class="flex items-center gap-2 min-w-0">
                 <span class="text-base shrink-0">⏳</span>
@@ -803,7 +789,7 @@
         </div>
 
         <footer id="chat-footer" class="p-3 pb-8 sm:pb-4 bg-slate-900/80 border-t border-slate-800 shrink-0 relative">
-            <!-- @ Username Auto-Predict Dropdown -->
+            
             <div id="mention-autocomplete" class="hidden absolute bottom-full left-4 mb-2 bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 rounded-2xl shadow-2xl p-1.5 max-h-56 overflow-y-auto min-w-[240px] max-w-xs z-30 space-y-1"></div>
 
             <form id="chat-form" class="flex items-center gap-2 min-w-0">
@@ -846,7 +832,6 @@
         let lastProfilesSyncTs = 0;
         let profilesSyncPromise = null;
 
-        // Device Identity, Bans, Shadowbans, Timeouts
         let deviceHardwareId = null;
         let deviceStorageId = null;
         let isCurrentDeviceBanned = false;
@@ -863,7 +848,6 @@
         let lastReadTimestamps = {};
         let unreadFirstMsgId = {};
 
-        // Call & WebRTC State
         let localStream = null;
         let displayStream = null;
         let activeCallRoomId = null;
@@ -891,7 +875,6 @@
         let localAudioAnalyser = null;
         let audioVUInterval = null;
 
-        // Profile Picture Cropper State (Centered & Normalized Full Zoom-Out)
         let pfpImg = null;
         let pfpZoom = 1;
         let pfpOffsetX = 0;
@@ -901,7 +884,6 @@
         let pfpDragStartX = 0;
         let pfpDragStartY = 0;
 
-        // @ Mention Autocomplete State
         let currentMentionMatches = [];
         let mentionSelectedIndex = 0;
         let activeMentionRange = null;
@@ -910,7 +892,6 @@
         const sessionLockChannel = new BroadcastChannel('mesh_session_lock');
         const fastPresenceBroadcast = new BroadcastChannel('mesh_presence_fast');
 
-        // Sub-1-second local cross-tab presence sync
         fastPresenceBroadcast.onmessage = (event) => {
             const d = event.data;
             if (!d) return;
@@ -1057,9 +1038,6 @@
         let contextChannelName = null;
         let activeReportTarget = null;
 
-        // ==========================================
-        // 1. IN-APP MODAL ENGINE (NO JS POPUPS)
-        // ==========================================
         function openCustomDialog({ title = 'Notice', message = '', showCancel = false, showInput = false, placeholder = '', defaultValue = '', confirmText = 'OK', isDanger = false }) {
             const modal = document.getElementById('custom-dialog-modal');
             const titleEl = document.getElementById('dialog-title');
@@ -1153,9 +1131,6 @@
             return openCustomDialog({ title, message, showCancel: true, showInput: true, placeholder, defaultValue, confirmText });
         }
 
-        // ==========================================
-        // 2. RELIABLE DEVICE FINGERPRINTING & STORAGE
-        // ==========================================
         function idbOpenSecurityDB() {
             return new Promise((resolve, reject) => {
                 try {
@@ -1215,7 +1190,6 @@
                 String(navigator.deviceMemory || '')
             ];
 
-            // WebGL GPU Renderer Fingerprint
             try {
                 const glCanvas = document.createElement('canvas');
                 const gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
@@ -1228,7 +1202,6 @@
                 }
             } catch(e) {}
 
-            // 2D Canvas Rendering Fingerprint
             try {
                 const c = document.createElement('canvas');
                 c.width = 220;
@@ -1259,7 +1232,6 @@
 
             deviceStorageId = lsVal || idbVal || cookieVal || `dev_${crypto.randomUUID()}`;
 
-            // Self-heal across all 3 storage layers
             localStorage.setItem('mesh_device_uid', deviceStorageId);
             setCookieVal('mesh_device_uid', deviceStorageId);
             await idbSet('mesh_device_uid', deviceStorageId);
@@ -1289,9 +1261,6 @@
             sessionStorage.setItem('mesh_linked_key', linkKey);
         }
 
-        // ==========================================
-        // 3. MODERATION ENGINE (BAN, SHADOWBAN, TIMEOUT)
-        // ==========================================
         async function syncModerationStateFromServer(targetUsername = null) {
             const { data: sysRecords } = await supabaseClient
                 .from('reports')
@@ -1355,7 +1324,6 @@
                 });
             }
 
-            // Also check local persistent ban cache in case server record was temporarily unreachable
             const localBanCacheRaw = localStorage.getItem('mesh_device_ban_cache') || await idbGet('mesh_device_ban_cache');
             if (!banRecordForSelf && localBanCacheRaw) {
                 try {
@@ -1371,7 +1339,6 @@
                 } catch(e) {}
             }
 
-            // Root admin protection
             const checkName = targetUsername || currentUser?.username;
             const isRootAdmin = checkName && checkName.toLowerCase() === 'sillygoobah33';
 
@@ -1389,14 +1356,12 @@
                 document.getElementById('device-banned-modal').classList.add('hidden');
             }
 
-            // Check shadowban status silently (NEVER alert the user!)
             isCurrentDeviceShadowbanned = !isRootAdmin && Boolean(
                 (deviceHardwareId && shadowbannedDevicesSet.has(deviceHardwareId)) ||
                 (deviceStorageId && shadowbannedDevicesSet.has(deviceStorageId)) ||
                 (checkName && shadowbannedUsersSet.has(checkName))
             );
 
-            // Check active timeout for currentUser
             enforceTimeoutUIState();
 
             return { banned: false, userToDevicesMap };
@@ -1422,9 +1387,6 @@
             }
         }
 
-        // ==========================================
-        // 4. DEVICE BANNED SCREEN & 24-HOUR APPEALS
-        // ==========================================
         function triggerDeviceBannedLockout(banInfo, attemptedUser = null) {
             if (isCallActive) endActiveVideoCall(true);
             if (currentUser) performLogout(false);
@@ -1450,7 +1412,6 @@
             const idbTs = Number((await idbGet('mesh_last_appeal_ts')) || 0);
             let latestAppealTs = Math.max(localTs, idbTs);
 
-            // Check server-side appeal timestamp for this device
             if (deviceHardwareId) {
                 const { data: appeals } = await supabaseClient
                     .from('reports')
@@ -1503,7 +1464,6 @@
                 return showAlert("Appeal Required", "Please write a brief explanation before submitting your appeal.");
             }
 
-            // Re-verify 24-hour cooldown before sending
             const localTs = Number(localStorage.getItem('mesh_last_appeal_ts') || 0);
             const idbTs = Number((await idbGet('mesh_last_appeal_ts')) || 0);
             let latestTs = Math.max(localTs, idbTs);
@@ -1552,9 +1512,6 @@
             refreshAppealCooldownState();
         }
 
-        // ==========================================
-        // 5. TIMEOUT ENFORCEMENT
-        // ==========================================
         function getActiveSelfTimeout() {
             if (!currentUser) return null;
             if (currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33') return null;
@@ -1607,9 +1564,6 @@
             }
         }
 
-        // ==========================================
-        // 6. AUTO-DELETE INACTIVE USERS (> 30 DAYS)
-        // ==========================================
         async function touchUserLastActive() {
             if (!currentUser) return;
             const nowIso = new Date().toISOString();
@@ -1656,9 +1610,6 @@
             } catch(e) {}
         }
 
-        // ==========================================
-        // 7. @ USERNAME AUTO-PREDICT & DISPLAY NAME MENTIONS
-        // ==========================================
         function getSavedLocalPronouns(username) {
             if (!username) return '';
             try {
@@ -1703,7 +1654,6 @@
                                 validUsernames.add(p.username);
                             }
                         });
-                        // Remove any non-existent / deleted usernames from cache
                         for (const cachedUname of Array.from(userProfileCache.keys())) {
                             if (!validUsernames.has(cachedUname)) {
                                 userProfileCache.delete(cachedUname);
@@ -1722,7 +1672,6 @@
         }
 
         function getAllCandidateProfiles() {
-            // Strictly return ONLY verified existing profiles from the database
             return Array.from(userProfileCache.values()).filter(
                 p => p && p.username && USERNAME_REGEX.test(p.username)
             );
@@ -1763,7 +1712,6 @@
                     return;
                 }
 
-                // Trigger background refresh of profiles so newly created or deleted accounts stay accurate
                 if (Date.now() - lastProfilesSyncTs > 4000) {
                     preloadAllUserProfiles(false).then(() => {
                         if (!mentionAutocomplete.classList.contains('hidden')) {
@@ -1890,7 +1838,6 @@
             });
         }
 
-        // Admin Panel Target Username Autocomplete
         function setupAdminTargetAutocomplete() {
             const adminInput = document.getElementById('admin-target-username');
             const adminDropdown = document.getElementById('admin-mention-autocomplete');
@@ -1932,9 +1879,6 @@
             });
         }
 
-        // ==========================================
-        // 8. UTILITIES, INVITES & CHANNEL PERMISSIONS
-        // ==========================================
         function getYouTubeVideoId(url) {
             if (!url) return null;
             const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
@@ -2020,9 +1964,6 @@
             contextMenu.classList.add('hidden');
         });
 
-        // ==========================================
-        // PROFILE PICTURE CROPPER (FULL ZOOM-OUT & ALWAYS CENTERED)
-        // ==========================================
         function clampPfpOffset(canvas) {
             if (!pfpImg || !pfpImg.naturalWidth || !pfpImg.naturalHeight) {
                 pfpOffsetX = 0;
@@ -2092,7 +2033,6 @@
                 });
             }
 
-            // Mouse wheel zoom centered on canvas
             canvas.addEventListener('wheel', (e) => {
                 if (!pfpImg) return;
                 e.preventDefault();
@@ -2204,10 +2144,8 @@
             const hasTag = rawText.startsWith('[SB]');
             const authorShadowbanned = shadowbannedUsersSet.has(msg.username);
 
-            // Author always sees their own message
             if (currentUser && msg.username === currentUser.username) return false;
 
-            // Admins can still see shadowbanned messages (tagged with badge)
             const isAdmin = currentUser && (currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33');
             if (isAdmin) return false;
 
@@ -2319,9 +2257,6 @@
             } catch(e) {}
         }
 
-        // ==========================================
-        // 9. ADMIN PANEL ACTIONS (BAN, SHADOWBAN, TIMEOUT, APPEALS)
-        // ==========================================
         document.getElementById('admin-timeout-duration').addEventListener('change', (e) => {
             const customInput = document.getElementById('admin-timeout-custom-mins');
             if (e.target.value === 'custom') customInput.classList.remove('hidden');
@@ -2842,9 +2777,6 @@
             triggerReport('user', uname);
         });
 
-        // ==========================================
-        // 10. FRIENDS-ONLY INVITES & DM RESTRICTIONS
-        // ==========================================
         function openChannelInviteModalCurrent() {
             contextChannelId = activeChannel;
             contextChannelName = channelNamesMap.get(activeChannel) || `# ${activeChannel}`;
@@ -2900,7 +2832,6 @@
             if (!currentUser) return;
             targetUsername = targetUsername.trim().toLowerCase();
 
-            // Strictly enforce friends-only DM invites
             if (!userFriends.has(targetUsername)) {
                 return showAlert("Friends Only", "You can only send channel invites or Direct Messages to accepted friends.");
             }
@@ -3005,7 +2936,6 @@
             const sendBtn = document.getElementById('send-btn');
             const mediaLabel = document.getElementById('media-file-label');
 
-            // Check DM friendship restriction
             if (activeChannel.startsWith('dm_')) {
                 const dmPeer = getDMTargetUsername(activeChannel);
                 if (dmPeer && !userFriends.has(dmPeer)) {
@@ -3036,9 +2966,6 @@
             }
         }
 
-        // ==========================================
-        // 11. SCREEN SHARE & VIDEO / GROUP CALLS (WITH MINIMIZE TO CHAT)
-        // ==========================================
         function displayScreenShareInPopup(stream, titleText = "Screen Share Stream") {
             screensharePopupVideo.srcObject = stream;
             document.getElementById('screenshare-popup-title').textContent = titleText;
@@ -3957,9 +3884,6 @@
             }
         }
 
-        // ==========================================
-        // 12. CHAT MESSAGES, REPLIES & MEDIA
-        // ==========================================
         mediaFileInput.addEventListener('change', (e) => {
             if (e.target.files && e.target.files[0]) {
                 selectedFile = e.target.files[0];
@@ -4137,6 +4061,15 @@
             const displayName = profile ? (profile.display_name || profile.username) : msg.username;
             const pronouns = profile && profile.pronouns ? profile.pronouns : '';
             const avatarUrl = profile ? profile.avatar_url : null;
+            if (profile && profile.message_background_url) {
+                const backgroundUrl = `url("${String(profile.message_background_url).replace(/["\\\\]/g, '')}")`;
+                const backgroundSize = Math.max(50, Math.min(200, Number(profile.message_background_size) || 100));
+                msgEl.style.backgroundImage = `linear-gradient(rgba(15, 23, 42, 0.76), rgba(15, 23, 42, 0.76)), ${backgroundUrl}`;
+                msgEl.style.backgroundSize = `auto, ${backgroundSize}% auto`;
+                msgEl.style.backgroundPosition = 'center, center';
+                msgEl.style.backgroundRepeat = 'no-repeat, no-repeat';
+                msgEl.style.backgroundColor = 'rgba(15, 23, 42, 0.8)';
+            }
 
             let textContent = msg.message || '';
             const wasShadowbannedMsg = textContent.startsWith('[SB]') || shadowbannedUsersSet.has(msg.username);
@@ -4278,15 +4211,20 @@
             }
         }
 
-        // ==========================================
-        // 13. PROFILE EDITING & AUTHENTICATION
-        // ==========================================
         document.getElementById('open-profile-btn').addEventListener('click', () => {
             document.getElementById('edit-display-name').value = currentUser.display_name || currentUser.username;
             document.getElementById('edit-pronouns').value = currentUser.pronouns || getSavedLocalPronouns(currentUser.username) || '';
             document.getElementById('edit-bio').value = currentUser.bio || '';
             document.getElementById('edit-standing-select').value = preferredStanding;
             document.getElementById('edit-status-text').value = currentUser.custom_status || '';
+            document.getElementById('message-background-size').value = currentUser.message_background_size || 100;
+            document.getElementById('profile-background-size').value = currentUser.profile_background_size || 100;
+            document.getElementById('message-background-size-value').textContent = `${currentUser.message_background_size || 100}%`;
+            document.getElementById('profile-background-size-value').textContent = `${currentUser.profile_background_size || 100}%`;
+            document.getElementById('message-background-input').value = '';
+            document.getElementById('profile-background-input').value = '';
+            document.getElementById('message-background-input').dataset.clear = 'false';
+            document.getElementById('profile-background-input').dataset.clear = 'false';
 
             pfpImg = null;
             pfpZoom = 1;
@@ -4318,6 +4256,36 @@
             profileModal.classList.add('hidden');
         });
 
+        document.getElementById('message-background-input').addEventListener('change', e => { if (e.target.files.length) e.target.dataset.clear = 'false'; });
+        document.getElementById('profile-background-input').addEventListener('change', e => { if (e.target.files.length) e.target.dataset.clear = 'false'; });
+        document.getElementById('message-background-size').addEventListener('input', e => {
+            document.getElementById('message-background-size-value').textContent = `${e.target.value}%`;
+        });
+        document.getElementById('profile-background-size').addEventListener('input', e => {
+            document.getElementById('profile-background-size-value').textContent = `${e.target.value}%`;
+        });
+        document.getElementById('clear-message-background').addEventListener('click', () => {
+            document.getElementById('message-background-input').dataset.clear = 'true';
+            document.getElementById('message-background-input').value = '';
+            showToast('Message background will be removed when you save.', 'info');
+        });
+        document.getElementById('clear-profile-background').addEventListener('click', () => {
+            document.getElementById('profile-background-input').dataset.clear = 'true';
+            document.getElementById('profile-background-input').value = '';
+            showToast('Profile background will be removed when you save.', 'info');
+        });
+
+        async function uploadProfileBackground(file, prefix) {
+            if (!file) return null;
+            if (!file.type.startsWith('image/')) throw new Error('Please choose an image file.');
+            if (file.size > 8 * 1024 * 1024) throw new Error('Background images must be 8 MB or smaller.');
+            const extension = (file.name.split('.').pop() || 'jpg').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'jpg';
+            const path = `${prefix}/${currentUser.id}_${Date.now()}_${Math.random().toString(36).slice(2)}.${extension}`;
+            const { error } = await supabaseClient.storage.from('chat-media').upload(path, file, { upsert: true });
+            if (error) throw error;
+            return supabaseClient.storage.from('chat-media').getPublicUrl(path).data.publicUrl;
+        }
+
         document.getElementById('save-profile-btn').addEventListener('click', async () => {
             const display_name = document.getElementById('edit-display-name').value.trim() || currentUser.username;
             const pronouns = document.getElementById('edit-pronouns').value.trim();
@@ -4347,8 +4315,21 @@
                         avatar_url = croppedDataUrl;
                     }
                 } catch (canvasSecurityErr) {
-                    // Keep existing avatar_url if external image couldn't be exported
                 }
+            }
+
+            let message_background_url = document.getElementById('message-background-input').dataset.clear === 'true' ? null : (currentUser.message_background_url || null);
+            let profile_background_url = document.getElementById('profile-background-input').dataset.clear === 'true' ? null : (currentUser.profile_background_url || null);
+            const messageBackgroundFile = document.getElementById('message-background-input').files[0];
+            const profileBackgroundFile = document.getElementById('profile-background-input').files[0];
+            const message_background_size = Number(document.getElementById('message-background-size').value);
+            const profile_background_size = Number(document.getElementById('profile-background-size').value);
+
+            try {
+                if (messageBackgroundFile) message_background_url = await uploadProfileBackground(messageBackgroundFile, 'message-backgrounds');
+                if (profileBackgroundFile) profile_background_url = await uploadProfileBackground(profileBackgroundFile, 'profile-backgrounds');
+            } catch (uploadError) {
+                return showAlert('Image Upload Error', uploadError.message || 'Could not upload your background image.');
             }
 
             let { error } = await supabaseClient.from('profiles').update({
@@ -4357,17 +4338,24 @@
                 bio,
                 standing,
                 custom_status,
-                avatar_url
+                avatar_url,
+                message_background_url,
+                message_background_size,
+                profile_background_url,
+                profile_background_size
             }).eq('id', currentUser.id);
 
-            // Graceful fallback if the Supabase `profiles` table does not have a `pronouns` column yet
             if (error && error.message && error.message.toLowerCase().includes('pronouns')) {
                 const retry = await supabaseClient.from('profiles').update({
                     display_name,
                     bio,
                     standing,
                     custom_status,
-                    avatar_url
+                    avatar_url,
+                    message_background_url,
+                    message_background_size,
+                    profile_background_url,
+                    profile_background_size
                 }).eq('id', currentUser.id);
                 error = retry.error;
             }
@@ -4378,17 +4366,19 @@
                 currentUser.bio = bio;
                 currentUser.custom_status = custom_status;
                 currentUser.avatar_url = avatar_url;
+                currentUser.message_background_url = message_background_url;
+                currentUser.message_background_size = message_background_size;
+                currentUser.profile_background_url = profile_background_url;
+                currentUser.profile_background_size = profile_background_size;
                 currentUser.standing = standing;
                 preferredStanding = standing;
                 setSavedLocalPronouns(currentUser.username, pronouns);
                 userProfileCache.set(currentUser.username, currentUser);
 
-                // Immediately update any mentions of this user visible in chat
                 document.querySelectorAll(`[data-mention-username="${CSS.escape(currentUser.username)}"]`).forEach(el => {
                     el.textContent = `@${display_name}`;
                 });
 
-                // Immediately update any pronoun badges of this user visible in chat
                 document.querySelectorAll(`[data-author-pronouns="${CSS.escape(currentUser.username)}"]`).forEach(el => {
                     if (pronouns) {
                         el.textContent = pronouns;
@@ -4598,9 +4588,6 @@
             }
         }
 
-        // ==========================================
-        // 14. SUB-1-SECOND REALTIME ONLINE PRESENCE
-        // ==========================================
         let presenceRenderPending = false;
         function schedulePresenceUIRender() {
             if (presenceRenderPending) return;
@@ -4674,7 +4661,6 @@
                     }
                 }
 
-                // Prune any users not in Presence state whose last fast heartbeat is > 2s old
                 for (const [uname] of Array.from(onlineUsersMap.entries())) {
                     if (uname === currentUser?.username) continue;
                     if (!seenInPresence.has(uname)) {
@@ -4874,15 +4860,23 @@
             }
             document.getElementById('view-profile-status').textContent = prof.custom_status || '';
             document.getElementById('view-profile-bio').textContent = prof.bio || "No bio set.";
+            const profileCard = document.getElementById('view-profile-card');
+            if (prof.profile_background_url) {
+                const safeBackground = String(prof.profile_background_url).replace(/["\\\\]/g, '');
+                const backgroundSize = Math.max(50, Math.min(200, Number(prof.profile_background_size) || 100));
+                profileCard.style.backgroundImage = `linear-gradient(rgba(15, 23, 42, 0.72), rgba(15, 23, 42, 0.82)), url("${safeBackground}")`;
+                profileCard.style.backgroundSize = `cover, ${backgroundSize}% auto`;
+                profileCard.style.backgroundPosition = 'center, center';
+            } else {
+                profileCard.style.backgroundImage = '';
+                profileCard.style.backgroundSize = '';
+            }
             const av = document.getElementById('view-profile-avatar');
             if (prof.avatar_url) av.innerHTML = `<img src="${escapeHTML(prof.avatar_url)}" class="w-full h-full object-cover">`;
             else av.textContent = (prof.display_name || prof.username).charAt(0).toUpperCase();
             document.getElementById('view-profile-modal').classList.remove('hidden');
         }
 
-        // ==========================================
-        // 15. FRIENDS SYSTEM & STRICT FRIENDS-ONLY DMs
-        // ==========================================
         document.getElementById('add-friend-btn').addEventListener('click', async () => {
             const target = document.getElementById('friend-username-input').value.trim().toLowerCase();
             if (!target || target === currentUser.username) return;
@@ -4977,7 +4971,6 @@
                 dmList.innerHTML = `<p class="text-[11px] text-slate-500 italic px-2">No active DMs</p>`;
             }
 
-            // Re-evaluate DM input lock if currently viewing a DM
             if (activeChannel.startsWith('dm_')) {
                 checkAnnouncementsPermissions();
             }
@@ -5066,9 +5059,6 @@
             loadChannelMessages();
         }
 
-        // ==========================================
-        // 16. CHAT MESSAGING & REALTIME SYNC
-        // ==========================================
         async function loadChannelMessages() {
             knownMessageIds.clear();
             const currentChan = activeChannel;
@@ -5199,7 +5189,6 @@
                 messageText = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodedSnippet}] ${messageText}`;
             }
 
-            // Silently tag shadowbanned messages so only the sender & admins see them
             if (isCurrentDeviceShadowbanned && !messageText.startsWith('[SB]')) {
                 messageText = `[SB]${messageText}`;
             }
@@ -5250,9 +5239,6 @@
             return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
         }
 
-        // ==========================================
-        // 17. INITIALIZATION SEQUENCE
-        // ==========================================
         (async function bootstrapMeshChat() {
             setupPfpCropper();
             setupChatMentionAutocomplete();
