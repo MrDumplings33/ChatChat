@@ -6,7 +6,7 @@
     <title>Mesh Chat</title>
     <link id="favicon" rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236366f1'><path d='M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z'/></svg>">
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -645,7 +645,7 @@
             <div class="flex items-center justify-between">
                 <span class="font-bold text-sm text-slate-200 flex items-center gap-2">
                     <span id="self-standing-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span>
-                    Mesh Chat <span class="text-[10px] text-indigo-400 font-mono">v5.0</span>
+                    Mesh Chat <span class="text-[10px] text-indigo-400 font-mono">v5.1 SQL</span>
                 </span>
                 <div class="flex gap-1">
                     <button id="open-admin-panel-btn" class="hidden text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-2 py-1 rounded transition-colors cursor-pointer">⚡ Panel</button>
@@ -802,12 +802,35 @@
     </main>
 
     <script>
-        const SUPABASE_URL = "https://yygscvzdlfudhjmyhuxu.supabase.co";
-        const SUPABASE_ANON_KEY = "sb_publishable_AAAy7XWb589B4sBcR5Sqjw__sOLyOlE";
-        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        // --- BACKEND CONFIGURATION ---
+        const SERVER_ORIGIN = window.location.protocol === 'https:'
+            ? "https://mesh-chat-local.duckdns.org:3000"
+            : "http://mesh-chat-local.duckdns.org:3000";
 
-        const APPEAL_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
-        const INACTIVE_DELETE_MS = 10 * 24 * 60 * 60 * 1000; // 30 days
+        let authToken = localStorage.getItem('mesh_auth_token') || null;
+        const socket = io(SERVER_ORIGIN, { autoConnect: true });
+
+        async function apiFetch(endpoint, options = {}) {
+            const headers = options.headers || {};
+            if (authToken) {
+                headers['Authorization'] = `Bearer ${authToken}`;
+            }
+            if (!(options.body instanceof FormData) && !headers['Content-Type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+            const res = await fetch(`${SERVER_ORIGIN}${endpoint}`, {
+                ...options,
+                headers
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || `Server Error (${res.status})`);
+            }
+            return data;
+        }
+
+        const APPEAL_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+        const INACTIVE_DELETE_MS = 10 * 24 * 60 * 60 * 1000;
         const USERNAME_REGEX = /^[a-z0-9_.]+$/;
 
         let currentUser = null;
@@ -818,17 +841,12 @@
         let selectedFile = null;
         let knownMessageIds = new Set();
         let fastPollingInterval = null;
-        let presenceHeartbeatInterval = null;
-        let presenceReaperInterval = null;
         let userProfileCache = new Map();
         let userFriends = new Set();
         let onlineUsersMap = new Map();
-        let lastUserHeartbeat = new Map();
         let allKnownUsers = new Set();
-        let preferredStanding = 'online'; // User's chosen standing state
-        let manualStanding = 'online';    // Active effective standing state
-        let presenceChannel = null;
-        let moderationChannel = null;
+        let preferredStanding = 'online';
+        let manualStanding = 'online';
         let lastProfilesSyncTs = 0;
         let profilesSyncPromise = null;
 
@@ -840,7 +858,7 @@
         let shadowbannedDevicesSet = new Set();
         let bannedUsersSet = new Set();
         let bannedDevicesSet = new Set();
-        let activeTimeoutsMap = new Map(); // username -> { until, reason, recordId }
+        let activeTimeoutsMap = new Map();
         let timeoutCountdownInterval = null;
         let appealCountdownInterval = null;
 
@@ -853,8 +871,6 @@
         let activeCallRoomId = null;
         let activeCallType = 'dm';
         let activeCallTarget = null;
-        let personalSignalingChannel = null;
-        let roomSignalingChannel = null;
         let pendingOfferPayload = null;
         let isCallActive = false;
         let isCallMinimized = false;
@@ -890,19 +906,126 @@
 
         const broadcastSignaling = new BroadcastChannel('mesh_chat_signaling');
         const sessionLockChannel = new BroadcastChannel('mesh_session_lock');
-        const fastPresenceBroadcast = new BroadcastChannel('mesh_presence_fast');
 
-        fastPresenceBroadcast.onmessage = (event) => {
-            const d = event.data;
-            if (!d) return;
-            if (d.type === 'ping' && d.username) {
-                handleIncomingPresenceSignal(d.username, d.standing || 'online');
-            } else if (d.type === 'leave' && d.username) {
-                onlineUsersMap.delete(d.username);
-                lastUserHeartbeat.delete(d.username);
-                schedulePresenceUIRender();
+        // --- SOCKET.IO REALTIME LISTENERS ---
+
+        socket.on('connect', () => {
+            if (currentUser) {
+                socket.emit('register_user', {
+                    username: currentUser.username,
+                    standing: manualStanding || 'online'
+                });
             }
-        };
+        });
+
+        socket.on('presence_sync', (serverMap) => {
+            onlineUsersMap.clear();
+            if (serverMap) {
+                Object.entries(serverMap).forEach(([uname, st]) => {
+                    if (st && st !== 'offline') onlineUsersMap.set(uname, st);
+                });
+            }
+            if (currentUser && manualStanding !== 'offline') {
+                onlineUsersMap.set(currentUser.username, manualStanding);
+            }
+            schedulePresenceUIRender();
+        });
+
+        socket.on('mod_event', async () => {
+            await syncModerationStateFromServer(currentUser?.username);
+        });
+
+        socket.on('friends_updated', () => {
+            if (currentUser) loadFriends();
+        });
+
+        socket.on('chat_insert', async (msg) => {
+            if (!msg) return;
+            if (isMessageShadowbannedForViewer(msg)) return;
+
+            if (msg.channel_id === activeChannel) {
+                if (!knownMessageIds.has(msg.id)) {
+                    knownMessageIds.add(msg.id);
+                    await appendMessageUI(msg);
+                    const threshold = chatBox.scrollHeight - chatBox.clientHeight - 150;
+                    if (chatBox.scrollTop >= threshold) {
+                        saveLastReadTimestamp(activeChannel);
+                    }
+                }
+            } else if (isUserMemberOfChannelOrDM(msg.channel_id) && msg.username !== currentUser?.username) {
+                unreadCounts[msg.channel_id] = (unreadCounts[msg.channel_id] || 0) + 1;
+                if (!unreadFirstMsgId[msg.channel_id]) unreadFirstMsgId[msg.channel_id] = msg.id;
+                loadChannels();
+                loadFriends();
+            }
+        });
+
+        socket.on('chat_update', async (msg) => {
+            if (!msg) return;
+            if (msg.channel_id === activeChannel) {
+                await updateMessageUIContent(msg.id, msg.message, true);
+            }
+        });
+
+        socket.on('chat_delete', (data) => {
+            if (data && data.id) {
+                removeMessageUI(data.id);
+                knownMessageIds.delete(data.id);
+            }
+        });
+
+        socket.on('user_signal', (payload) => {
+            if (!currentUser || !payload) return;
+            if (isCurrentDeviceShadowbanned || shadowbannedUsersSet.has(payload.callerUsername)) return;
+
+            if (payload.type === 'offer') {
+                pendingOfferPayload = payload;
+                document.getElementById('incoming-caller-text').textContent = `@${payload.callerUsername} is calling...`;
+                document.getElementById('incoming-call-modal').classList.remove('hidden');
+            } else if (payload.type === 'end-call') {
+                endActiveVideoCall(false);
+            }
+        });
+
+        socket.on('room_signal', async (payload) => {
+            if (!isCallActive || !payload || !currentUser || payload.sender === currentUser.username) return;
+            if (payload.target && payload.target !== currentUser.username) return;
+
+            if (payload.type === 'user_joined_call') {
+                peerMediaStates.set(payload.username, {
+                    micMuted: false,
+                    camMuted: false,
+                    displayName: payload.displayName,
+                    avatarUrl: payload.avatarUrl
+                });
+                if (peerConnections.has(payload.username)) {
+                    try { peerConnections.get(payload.username).close(); } catch (e) {}
+                    peerConnections.delete(payload.username);
+                    iceCandidateQueues.delete(payload.username);
+                }
+                setupPeerConnection(payload.username, true);
+            } else if (payload.type === 'offer') {
+                peerMediaStates.set(payload.sender, {
+                    micMuted: false,
+                    camMuted: false,
+                    displayName: payload.senderDisplayName,
+                    avatarUrl: payload.senderAvatarUrl
+                });
+                await handleIncomingOffer(payload.sender, payload.offer);
+            } else if (payload.type === 'answer') {
+                await handleIncomingAnswer(payload.sender, payload.answer);
+            } else if (payload.type === 'ice-candidate') {
+                await handleIncomingIceCandidate(payload.sender, payload.candidate);
+            } else if (payload.type === 'media_state_change') {
+                const state = peerMediaStates.get(payload.sender) || {};
+                state.micMuted = payload.micMuted;
+                state.camMuted = payload.camMuted;
+                peerMediaStates.set(payload.sender, state);
+                renderVideoGrid();
+            } else if (payload.type === 'user_left_call') {
+                removePeerConnection(payload.sender);
+            }
+        });
 
         sessionLockChannel.onmessage = (event) => {
             const data = event.data;
@@ -922,18 +1045,10 @@
         };
 
         window.addEventListener('storage', (e) => {
-            if (e.key === 'mesh_chat_session') {
+            if (e.key === 'mesh_auth_token') {
                 if (!e.newValue && currentUser) {
                     performLogout(false);
                     showToast("Signed out from another tab", "info");
-                } else if (e.newValue && currentUser) {
-                    try {
-                        const parsed = JSON.parse(e.newValue);
-                        if (parsed.username && parsed.username !== currentUser.username) {
-                            performLogout(false);
-                            showToast(`Signed out because @${parsed.username} logged in another tab`, "error");
-                        }
-                    } catch(err) {}
                 }
             }
         });
@@ -953,62 +1068,25 @@
         }
 
         document.addEventListener('visibilitychange', () => {
-            if (document.hidden) {
-                handleTabInactive();
-            } else {
-                handleTabActive();
-            }
+            if (document.hidden) handleTabInactive();
+            else handleTabActive();
         });
-
-        window.addEventListener('blur', () => {
-            handleTabInactive();
-        });
-
-        window.addEventListener('focus', () => {
-            handleTabActive();
-        });
-
-        window.addEventListener('pageshow', () => {
-            if (!document.hidden) handleTabActive();
-        });
-
+        window.addEventListener('blur', handleTabInactive);
+        window.addEventListener('focus', handleTabActive);
+        window.addEventListener('pageshow', () => { if (!document.hidden) handleTabActive(); });
         ['pointerdown', 'keydown'].forEach(evtName => {
-            window.addEventListener(evtName, () => {
-                if (!document.hidden) handleTabActive();
-            }, { passive: true });
+            window.addEventListener(evtName, () => { if (!document.hidden) handleTabActive(); }, { passive: true });
         });
 
-        const notifyImmediateDeparture = () => {
-            if (currentUser) {
-                fastPresenceBroadcast.postMessage({ type: 'leave', username: currentUser.username });
-                if (presenceChannel) {
-                    try {
-                        presenceChannel.send({
-                            type: 'broadcast',
-                            event: 'presence-leave',
-                            payload: { username: currentUser.username }
-                        });
-                        presenceChannel.untrack();
-                    } catch(e) {}
-                }
-            }
-        };
-
-        window.addEventListener('pagehide', notifyImmediateDeparture);
         window.addEventListener('beforeunload', () => {
-            notifyImmediateDeparture();
-            if (isCallActive) {
-                endActiveVideoCall(true);
-            }
+            if (isCallActive) endActiveVideoCall(true);
         });
 
         const rtcConfig = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' },
-                { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' }
+                { urls: 'stun:stun2.l.google.com:19302' }
             ]
         };
 
@@ -1141,7 +1219,7 @@
                     };
                     req.onsuccess = () => resolve(req.result);
                     req.onerror = () => reject(req.error);
-                } catch(e) { reject(e); }
+                } catch (e) { reject(e); }
             });
         }
 
@@ -1154,7 +1232,7 @@
                     tx.oncomplete = () => resolve(true);
                     tx.onerror = () => resolve(false);
                 });
-            } catch(e) { return false; }
+            } catch (e) { return false; }
         }
 
         async function idbGet(key) {
@@ -1166,7 +1244,7 @@
                     req.onsuccess = () => resolve(req.result || null);
                     req.onerror = () => resolve(null);
                 });
-            } catch(e) { return null; }
+            } catch (e) { return null; }
         }
 
         function getCookieVal(name) {
@@ -1200,7 +1278,7 @@
                         parts.push(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '');
                     }
                 }
-            } catch(e) {}
+            } catch (e) {}
 
             try {
                 const c = document.createElement('canvas');
@@ -1214,7 +1292,7 @@
                 ctx.fillStyle = '#069';
                 ctx.fillText('MeshChatDeviceFP_v5', 4, 12);
                 parts.push(c.toDataURL());
-            } catch(e) {}
+            } catch (e) {}
 
             const raw = parts.join('||');
             const encoder = new TextEncoder();
@@ -1237,37 +1315,11 @@
             await idbSet('mesh_device_uid', deviceStorageId);
         }
 
-        async function linkCurrentDeviceToUser(username) {
-            if (!username || !deviceHardwareId) return;
-            const linkKey = `${username}::${deviceHardwareId}`;
-            const cachedLink = sessionStorage.getItem('mesh_linked_key');
-            if (cachedLink === linkKey) return;
-
-            const payload = JSON.stringify({
-                username,
-                hardwareId: deviceHardwareId,
-                storageId: deviceStorageId,
-                ua: navigator.userAgent.slice(0, 120),
-                ts: Date.now()
-            });
-
-            await supabaseClient.from('reports').insert([{
-                reporter_username: username,
-                target_type: 'sys_device_link',
-                target_id: deviceHardwareId,
-                reason: payload
-            }]);
-
-            sessionStorage.setItem('mesh_linked_key', linkKey);
-        }
-
         async function syncModerationStateFromServer(targetUsername = null) {
-            const { data: sysRecords } = await supabaseClient
-                .from('reports')
-                .select('*')
-                .in('target_type', ['sys_device_ban', 'sys_shadowban', 'sys_timeout', 'sys_device_link'])
-                .order('created_at', { ascending: false })
-                .limit(1000);
+            let sysRecords = null;
+            try {
+                sysRecords = await apiFetch('/api/moderation/sync');
+            } catch (e) {}
 
             bannedUsersSet.clear();
             bannedDevicesSet.clear();
@@ -1278,10 +1330,10 @@
             const userToDevicesMap = new Map();
             let banRecordForSelf = null;
 
-            if (sysRecords) {
+            if (Array.isArray(sysRecords)) {
                 sysRecords.forEach(rec => {
                     let meta = {};
-                    try { meta = JSON.parse(rec.reason || '{}'); } catch(e) { meta = { reason: rec.reason }; }
+                    try { meta = JSON.parse(rec.reason || '{}'); } catch (e) { meta = { reason: rec.reason }; }
 
                     if (rec.target_type === 'sys_device_link') {
                         const uname = meta.username || rec.reporter_username;
@@ -1336,7 +1388,7 @@
                             banRecordForSelf = cached;
                         }
                     }
-                } catch(e) {}
+                } catch (e) {}
             }
 
             const checkName = targetUsername || currentUser?.username;
@@ -1363,28 +1415,7 @@
             );
 
             enforceTimeoutUIState();
-
             return { banned: false, userToDevicesMap };
-        }
-
-        function setupGlobalModerationRealtime() {
-            if (moderationChannel) {
-                try { supabaseClient.removeChannel(moderationChannel); } catch(e) {}
-            }
-            moderationChannel = supabaseClient.channel('global-moderation');
-            moderationChannel.on('broadcast', { event: 'mod-event' }, async () => {
-                await syncModerationStateFromServer(currentUser?.username);
-            }).subscribe();
-        }
-
-        function broadcastModerationChange(action, targetUsername) {
-            if (moderationChannel) {
-                moderationChannel.send({
-                    type: 'broadcast',
-                    event: 'mod-event',
-                    payload: { action, targetUsername, ts: Date.now() }
-                });
-            }
         }
 
         function triggerDeviceBannedLockout(banInfo, attemptedUser = null) {
@@ -1413,18 +1444,13 @@
             let latestAppealTs = Math.max(localTs, idbTs);
 
             if (deviceHardwareId) {
-                const { data: appeals } = await supabaseClient
-                    .from('reports')
-                    .select('created_at')
-                    .eq('target_type', 'ban_appeal')
-                    .eq('target_id', deviceHardwareId)
-                    .order('created_at', { ascending: false })
-                    .limit(1);
-
-                if (appeals && appeals[0] && appeals[0].created_at) {
-                    const srvTs = new Date(appeals[0].created_at).getTime();
-                    if (srvTs > latestAppealTs) latestAppealTs = srvTs;
-                }
+                try {
+                    const res = await apiFetch(`/api/appeals/latest/${encodeURIComponent(deviceHardwareId)}`);
+                    if (res && res.created_at) {
+                        const srvTs = new Date(res.created_at).getTime();
+                        if (srvTs > latestAppealTs) latestAppealTs = srvTs;
+                    }
+                } catch (e) {}
             }
 
             if (appealCountdownInterval) clearInterval(appealCountdownInterval);
@@ -1468,17 +1494,12 @@
             const idbTs = Number((await idbGet('mesh_last_appeal_ts')) || 0);
             let latestTs = Math.max(localTs, idbTs);
 
-            const { data: existingAppeals } = await supabaseClient
-                .from('reports')
-                .select('created_at')
-                .eq('target_type', 'ban_appeal')
-                .eq('target_id', deviceHardwareId)
-                .order('created_at', { ascending: false })
-                .limit(1);
-
-            if (existingAppeals && existingAppeals[0]) {
-                latestTs = Math.max(latestTs, new Date(existingAppeals[0].created_at).getTime());
-            }
+            try {
+                const res = await apiFetch(`/api/appeals/latest/${encodeURIComponent(deviceHardwareId)}`);
+                if (res && res.created_at) {
+                    latestTs = Math.max(latestTs, new Date(res.created_at).getTime());
+                }
+            } catch (e) {}
 
             if (latestTs > 0 && (Date.now() - latestTs) < APPEAL_COOLDOWN_MS) {
                 refreshAppealCooldownState();
@@ -1488,21 +1509,24 @@
             const lastUser = localStorage.getItem('mesh_last_banned_username') || 'Banned Device';
             const now = Date.now();
 
-            const { error } = await supabaseClient.from('reports').insert([{
-                reporter_username: lastUser,
-                target_type: 'ban_appeal',
-                target_id: deviceHardwareId,
-                reason: JSON.stringify({
-                    appealText,
-                    hardwareId: deviceHardwareId,
-                    storageId: deviceStorageId,
-                    username: lastUser,
-                    submittedAt: now
-                })
-            }]);
-
-            if (error) {
-                return showAlert("Submission Error", "Could not submit appeal: " + error.message);
+            try {
+                await apiFetch('/api/reports', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        reporter_username: lastUser,
+                        target_type: 'ban_appeal',
+                        target_id: deviceHardwareId,
+                        reason: JSON.stringify({
+                            appealText,
+                            hardwareId: deviceHardwareId,
+                            storageId: deviceStorageId,
+                            username: lastUser,
+                            submittedAt: now
+                        })
+                    })
+                });
+            } catch (err) {
+                return showAlert("Submission Error", "Could not submit appeal: " + err.message);
             }
 
             localStorage.setItem('mesh_last_appeal_ts', String(now));
@@ -1564,59 +1588,19 @@
             }
         }
 
-        async function touchUserLastActive() {
-            if (!currentUser) return;
-            const nowIso = new Date().toISOString();
-            localStorage.setItem(`mesh_active_${currentUser.username}`, String(Date.now()));
-            try {
-                await supabaseClient.from('profiles').update({ last_active: nowIso }).eq('id', currentUser.id);
-            } catch(e) {}
-        }
-
         async function runInactiveUsersAutoCleanup(showFeedback = false) {
             try {
-                const { data: allProfiles } = await supabaseClient.from('profiles').select('*');
-                if (!allProfiles) return;
-
-                const cutoffMs = Date.now() - INACTIVE_DELETE_MS;
-                let deletedCount = 0;
-
-                for (const prof of allProfiles) {
-                    if (currentUser && prof.id === currentUser.id) continue;
-                    if (prof.username && prof.username.toLowerCase() === 'sillygoobah33') continue;
-
-                    const activitySource = prof.last_active || prof.updated_at || prof.created_at;
-                    if (!activitySource) continue;
-
-                    const lastActiveTs = new Date(activitySource).getTime();
-                    if (!isNaN(lastActiveTs) && lastActiveTs < cutoffMs) {
-                        await supabaseClient.from('chat_messages').delete().eq('username', prof.username);
-                        await supabaseClient.from('friends').delete().or(`user_id.eq.${prof.id},friend_id.eq.${prof.id}`);
-                        const { error } = await supabaseClient.from('profiles').delete().eq('id', prof.id);
-                        if (!error) {
-                            deletedCount++;
-                            userProfileCache.delete(prof.username);
-                            allKnownUsers.delete(prof.username);
-                        }
-                    }
-                }
-
+                const res = await apiFetch('/api/admin/cleanup-inactive', { method: 'POST' });
                 if (showFeedback) {
-                    showToast(`Inactive cleanup complete: removed ${deletedCount} user(s) inactive >30 days.`, "success");
+                    showToast(`Inactive cleanup complete: removed ${res.deletedCount} user(s) inactive >10 days.`, "success");
                     refreshAdminStats();
-                } else if (deletedCount > 0) {
-                    console.info(`Auto-cleaned ${deletedCount} inactive user(s) (>30 days).`);
                 }
-            } catch(e) {}
+            } catch (e) {}
         }
 
         function getSavedLocalPronouns(username) {
             if (!username) return '';
-            try {
-                return localStorage.getItem(`mesh_pronouns_${username}`) || '';
-            } catch(e) {
-                return '';
-            }
+            try { return localStorage.getItem(`mesh_pronouns_${username}`) || ''; } catch (e) { return ''; }
         }
 
         function setSavedLocalPronouns(username, pronouns) {
@@ -1624,7 +1608,7 @@
             try {
                 if (pronouns) localStorage.setItem(`mesh_pronouns_${username}`, pronouns);
                 else localStorage.removeItem(`mesh_pronouns_${username}`);
-            } catch(e) {}
+            } catch (e) {}
         }
 
         function hydrateProfilePronouns(prof) {
@@ -1644,8 +1628,8 @@
 
             profilesSyncPromise = (async () => {
                 try {
-                    const { data: profiles, error } = await supabaseClient.from('profiles').select('*');
-                    if (!error && Array.isArray(profiles)) {
+                    const profiles = await apiFetch('/api/profiles');
+                    if (Array.isArray(profiles)) {
                         const validUsernames = new Set();
                         profiles.forEach(p => {
                             if (p && p.username && USERNAME_REGEX.test(p.username)) {
@@ -1916,7 +1900,7 @@
                         channelNamesMap.set(ch.id, ch.name);
                     });
                 }
-            } catch(e) {}
+            } catch (e) {}
         }
 
         function checkInviteLinkInUrl() {
@@ -1956,7 +1940,7 @@
                 }
                 joinChannelById(cid, cname);
                 sessionStorage.removeItem('pending_mesh_invite');
-            } catch(e) {}
+            } catch (e) {}
         }
 
         window.addEventListener('click', (e) => {
@@ -2127,7 +2111,7 @@
             try {
                 const raw = localStorage.getItem(`mesh_last_read_${currentUser.username}`);
                 if (raw) lastReadTimestamps = JSON.parse(raw);
-            } catch(e) {
+            } catch (e) {
                 lastReadTimestamps = {};
             }
         }
@@ -2156,16 +2140,15 @@
             if (!currentUser) return;
             loadSavedLastReadTimestamps();
 
-            const { data: messages } = await supabaseClient
-                .from('chat_messages')
-                .select('id, channel_id, created_at, username, message')
-                .order('created_at', { ascending: true })
-                .limit(5000);
+            let messages = [];
+            try {
+                messages = await apiFetch('/api/messages/unread-scan');
+            } catch (e) {}
 
             unreadCounts = {};
             unreadFirstMsgId = {};
 
-            if (messages) {
+            if (Array.isArray(messages)) {
                 messages.forEach(msg => {
                     if (msg.username === currentUser.username) return;
                     if (isMessageShadowbannedForViewer(msg)) return;
@@ -2254,8 +2237,10 @@
                     osc.start();
                     osc.stop(ctx.currentTime + 0.1);
                 }
-            } catch(e) {}
+            } catch (e) {}
         }
+
+        // --- ADMIN PANEL CONTROLS ---
 
         document.getElementById('admin-timeout-duration').addEventListener('change', (e) => {
             const customInput = document.getElementById('admin-timeout-custom-mins');
@@ -2272,39 +2257,35 @@
         });
 
         async function refreshAdminStats() {
-            const { count: uCount } = await supabaseClient.from('profiles').select('*', { count: 'exact', head: true });
-            const { count: mCount } = await supabaseClient.from('chat_messages').select('*', { count: 'exact', head: true });
-            const { data: userReports } = await supabaseClient
-                .from('reports')
-                .select('id, target_type')
-                .not('target_type', 'like', 'sys_%');
-
-            document.getElementById('admin-stat-users').textContent = uCount || 0;
-            document.getElementById('admin-stat-messages').textContent = mCount || 0;
-            document.getElementById('admin-stat-reports').textContent = userReports ? userReports.length : 0;
-            document.getElementById('admin-stat-active').textContent = onlineUsersMap.size || 1;
+            try {
+                const stats = await apiFetch('/api/admin/stats');
+                document.getElementById('admin-stat-users').textContent = stats.users || 0;
+                document.getElementById('admin-stat-messages').textContent = stats.messages || 0;
+                document.getElementById('admin-stat-reports').textContent = stats.reports || 0;
+                document.getElementById('admin-stat-active').textContent = onlineUsersMap.size || 1;
+            } catch (e) {}
         }
 
         async function refreshAdminModerationLists() {
             await syncModerationStateFromServer(currentUser?.username);
-            const { data: sysRecords } = await supabaseClient
-                .from('reports')
-                .select('*')
-                .in('target_type', ['sys_device_ban', 'sys_shadowban', 'sys_timeout'])
-                .order('created_at', { ascending: false });
+            let sysRecords = [];
+            try {
+                sysRecords = await apiFetch('/api/moderation/sync');
+            } catch (e) {}
 
             const list = document.getElementById('admin-active-mod-list');
             list.innerHTML = '';
 
-            if (!sysRecords || sysRecords.length === 0) {
+            if (!Array.isArray(sysRecords) || sysRecords.length === 0) {
                 list.innerHTML = '<p class="text-xs text-slate-500 italic">No active device bans, shadowbans, or timeouts.</p>';
                 return;
             }
 
             let count = 0;
             sysRecords.forEach(rec => {
+                if (rec.target_type === 'sys_device_link') return;
                 let meta = {};
-                try { meta = JSON.parse(rec.reason || '{}'); } catch(e) { meta = { reason: rec.reason }; }
+                try { meta = JSON.parse(rec.reason || '{}'); } catch (e) { meta = { reason: rec.reason }; }
 
                 if (rec.target_type === 'sys_timeout' && Number(meta.until || 0) <= Date.now()) return;
 
@@ -2342,21 +2323,21 @@
         }
 
         async function removeModerationRecord(recordId) {
-            const { error } = await supabaseClient.from('reports').delete().eq('id', recordId);
-            if (!error) {
-                broadcastModerationChange('lift', '');
+            try {
+                await apiFetch(`/api/admin/reports/${encodeURIComponent(recordId)}`, { method: 'DELETE' });
                 await syncModerationStateFromServer(currentUser?.username);
                 await refreshAdminModerationLists();
                 showToast("Moderation restriction removed.", "success");
+            } catch (err) {
+                showToast(err.message, "error");
             }
         }
 
         async function refreshAdminReports() {
-            const { data: reports } = await supabaseClient
-                .from('reports')
-                .select('*')
-                .not('target_type', 'like', 'sys_%')
-                .order('created_at', { ascending: false });
+            let reports = [];
+            try {
+                reports = await apiFetch('/api/admin/reports');
+            } catch (e) {}
 
             const list = document.getElementById('admin-reports-list');
             const appealsList = document.getElementById('admin-appeals-list');
@@ -2366,12 +2347,12 @@
             let hasReports = false;
             let hasAppeals = false;
 
-            if (reports && reports.length > 0) {
+            if (Array.isArray(reports) && reports.length > 0) {
                 reports.forEach(r => {
                     if (r.target_type === 'ban_appeal') {
                         hasAppeals = true;
                         let meta = {};
-                        try { meta = JSON.parse(r.reason || '{}'); } catch(e) { meta = { appealText: r.reason }; }
+                        try { meta = JSON.parse(r.reason || '{}'); } catch (e) { meta = { appealText: r.reason }; }
 
                         const div = document.createElement('div');
                         div.className = "bg-slate-900 p-3 rounded-xl border border-amber-500/30 text-xs space-y-2";
@@ -2419,56 +2400,33 @@
         }
 
         async function approveBanAppeal(appealId, deviceId, username) {
-            await supabaseClient.from('reports').delete().eq('id', appealId);
-            if (deviceId) {
-                await supabaseClient.from('reports').delete().eq('target_type', 'sys_device_ban').eq('target_id', deviceId);
+            try {
+                await apiFetch('/api/admin/moderation', {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'approve_appeal', appealId, deviceId, targetUsername: username })
+                });
+                await refreshAdminReports();
+                await refreshAdminModerationLists();
+                await refreshAdminStats();
+                showToast("Appeal approved and device unbanned!", "success");
+            } catch (err) {
+                showToast(err.message, "error");
             }
-            if (username && username !== 'Banned Device' && username !== 'Unknown') {
-                await supabaseClient.from('reports').delete().eq('target_type', 'sys_device_ban').eq('target_id', username);
-            }
-            broadcastModerationChange('unban', username);
-            await refreshAdminReports();
-            await refreshAdminModerationLists();
-            await refreshAdminStats();
-            showToast("Appeal approved and device unbanned!", "success");
         }
 
         async function dismissReport(reportId) {
-            const { error } = await supabaseClient.from('reports').delete().eq('id', reportId);
-            if (!error) {
+            try {
+                await apiFetch(`/api/admin/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' });
                 showToast("Dismissed", "success");
                 refreshAdminReports();
                 refreshAdminStats();
-            } else {
-                showToast("Failed to dismiss", "error");
+            } catch (err) {
+                showToast(err.message, "error");
             }
         }
 
         function getAdminTargetCleanUsername() {
             return document.getElementById('admin-target-username').value.trim().replace(/^@/, '').toLowerCase();
-        }
-
-        async function resolveDevicesForUsername(targetUsername) {
-            const { data: links } = await supabaseClient
-                .from('reports')
-                .select('*')
-                .eq('target_type', 'sys_device_link')
-                .eq('reporter_username', targetUsername);
-
-            const hwIds = new Set();
-            const stIds = new Set();
-
-            if (links) {
-                links.forEach(l => {
-                    if (l.target_id) hwIds.add(l.target_id);
-                    try {
-                        const m = JSON.parse(l.reason || '{}');
-                        if (m.hardwareId) hwIds.add(m.hardwareId);
-                        if (m.storageId) stIds.add(m.storageId);
-                    } catch(e) {}
-                });
-            }
-            return { hwIds: Array.from(hwIds), stIds: Array.from(stIds) };
         }
 
         async function adminDeviceBanTarget() {
@@ -2487,70 +2445,32 @@
             );
             if (!reason) return;
 
-            const { hwIds, stIds } = await resolveDevicesForUsername(targetUsername);
-            const inserts = [{
-                reporter_username: currentUser.username,
-                target_type: 'sys_device_ban',
-                target_id: targetUsername,
-                reason: JSON.stringify({
-                    username: targetUsername,
-                    hardwareId: hwIds[0] || '',
-                    storageId: stIds[0] || '',
-                    reason,
-                    by: currentUser.username
-                })
-            }];
-
-            hwIds.forEach(hw => {
-                inserts.push({
-                    reporter_username: currentUser.username,
-                    target_type: 'sys_device_ban',
-                    target_id: hw,
-                    reason: JSON.stringify({
-                        username: targetUsername,
-                        hardwareId: hw,
-                        storageId: stIds[0] || '',
-                        reason,
-                        by: currentUser.username
-                    })
+            try {
+                const res = await apiFetch('/api/admin/moderation', {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'ban', targetUsername, reason })
                 });
-            });
-
-            stIds.forEach(st => {
-                inserts.push({
-                    reporter_username: currentUser.username,
-                    target_type: 'sys_device_ban',
-                    target_id: st,
-                    reason: JSON.stringify({
-                        username: targetUsername,
-                        hardwareId: hwIds[0] || '',
-                        storageId: st,
-                        reason,
-                        by: currentUser.username
-                    })
-                });
-            });
-
-            await supabaseClient.from('reports').insert(inserts);
-            broadcastModerationChange('ban', targetUsername);
-            await refreshAdminModerationLists();
-            showToast(`Device banned @${targetUsername} (${hwIds.length} device(s) locked)!`, "success");
+                await refreshAdminModerationLists();
+                showToast(`Device banned @${targetUsername} (${res.deviceCount || 0} device(s) locked)!`, "success");
+            } catch (err) {
+                showAlert("Error", err.message);
+            }
         }
 
         async function adminDeviceUnbanTarget() {
             const targetUsername = getAdminTargetCleanUsername();
             if (!targetUsername) return showAlert("Admin Action", "Please enter a target username.");
 
-            const { hwIds, stIds } = await resolveDevicesForUsername(targetUsername);
-            const allTargets = [targetUsername, ...hwIds, ...stIds];
-
-            for (const tid of allTargets) {
-                await supabaseClient.from('reports').delete().eq('target_type', 'sys_device_ban').eq('target_id', tid);
+            try {
+                await apiFetch('/api/admin/moderation', {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'unban', targetUsername })
+                });
+                await refreshAdminModerationLists();
+                showToast(`Lifted device ban for @${targetUsername}.`, "success");
+            } catch (err) {
+                showAlert("Error", err.message);
             }
-
-            broadcastModerationChange('unban', targetUsername);
-            await refreshAdminModerationLists();
-            showToast(`Lifted device ban for @${targetUsername}.`, "success");
         }
 
         async function adminDeviceShadowbanTarget() {
@@ -2560,67 +2480,32 @@
                 return showAlert("Protected Account", "You cannot shadowban yourself or the root admin.");
             }
 
-            const { hwIds, stIds } = await resolveDevicesForUsername(targetUsername);
-            const inserts = [{
-                reporter_username: currentUser.username,
-                target_type: 'sys_shadowban',
-                target_id: targetUsername,
-                reason: JSON.stringify({
-                    username: targetUsername,
-                    hardwareId: hwIds[0] || '',
-                    storageId: stIds[0] || '',
-                    by: currentUser.username
-                })
-            }];
-
-            hwIds.forEach(hw => {
-                inserts.push({
-                    reporter_username: currentUser.username,
-                    target_type: 'sys_shadowban',
-                    target_id: hw,
-                    reason: JSON.stringify({
-                        username: targetUsername,
-                        hardwareId: hw,
-                        storageId: stIds[0] || '',
-                        by: currentUser.username
-                    })
+            try {
+                const res = await apiFetch('/api/admin/moderation', {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'shadowban', targetUsername })
                 });
-            });
-
-            stIds.forEach(st => {
-                inserts.push({
-                    reporter_username: currentUser.username,
-                    target_type: 'sys_shadowban',
-                    target_id: st,
-                    reason: JSON.stringify({
-                        username: targetUsername,
-                        hardwareId: hwIds[0] || '',
-                        storageId: st,
-                        by: currentUser.username
-                    })
-                });
-            });
-
-            await supabaseClient.from('reports').insert(inserts);
-            broadcastModerationChange('shadowban', targetUsername);
-            await refreshAdminModerationLists();
-            showToast(`Silently shadowbanned @${targetUsername} & ${hwIds.length} linked device(s).`, "success");
+                await refreshAdminModerationLists();
+                showToast(`Silently shadowbanned @${targetUsername} & ${res.deviceCount || 0} linked device(s).`, "success");
+            } catch (err) {
+                showAlert("Error", err.message);
+            }
         }
 
         async function adminDeviceUnshadowbanTarget() {
             const targetUsername = getAdminTargetCleanUsername();
             if (!targetUsername) return showAlert("Admin Action", "Please enter a target username.");
 
-            const { hwIds, stIds } = await resolveDevicesForUsername(targetUsername);
-            const allTargets = [targetUsername, ...hwIds, ...stIds];
-
-            for (const tid of allTargets) {
-                await supabaseClient.from('reports').delete().eq('target_type', 'sys_shadowban').eq('target_id', tid);
+            try {
+                await apiFetch('/api/admin/moderation', {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'unshadowban', targetUsername })
+                });
+                await refreshAdminModerationLists();
+                showToast(`Removed device shadowban for @${targetUsername}.`, "success");
+            } catch (err) {
+                showAlert("Error", err.message);
             }
-
-            broadcastModerationChange('unshadowban', targetUsername);
-            await refreshAdminModerationLists();
-            showToast(`Removed device shadowban for @${targetUsername}.`, "success");
         }
 
         async function adminTimeoutUser() {
@@ -2638,40 +2523,48 @@
             if (!mins || mins < 1) return showAlert("Invalid Duration", "Please specify a valid timeout duration in minutes.");
 
             const reason = document.getElementById('admin-timeout-reason').value.trim() || `Timed out for ${mins} minute(s)`;
-            const until = Date.now() + mins * 60 * 1000;
 
-            await supabaseClient.from('reports').delete().eq('target_type', 'sys_timeout').eq('target_id', targetUsername);
-            await supabaseClient.from('reports').insert([{
-                reporter_username: currentUser.username,
-                target_type: 'sys_timeout',
-                target_id: targetUsername,
-                reason: JSON.stringify({ until, reason, mins, by: currentUser.username })
-            }]);
-
-            broadcastModerationChange('timeout', targetUsername);
-            await refreshAdminModerationLists();
-            showToast(`Timed out @${targetUsername} for ${mins} minute(s).`, "success");
+            try {
+                await apiFetch('/api/admin/moderation', {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'timeout', targetUsername, mins, reason })
+                });
+                await refreshAdminModerationLists();
+                showToast(`Timed out @${targetUsername} for ${mins} minute(s).`, "success");
+            } catch (err) {
+                showAlert("Error", err.message);
+            }
         }
 
         async function adminRemoveTimeoutUser() {
             const targetUsername = getAdminTargetCleanUsername();
             if (!targetUsername) return showAlert("Admin Action", "Please enter a target username.");
 
-            await supabaseClient.from('reports').delete().eq('target_type', 'sys_timeout').eq('target_id', targetUsername);
-            broadcastModerationChange('untimeout', targetUsername);
-            await refreshAdminModerationLists();
-            showToast(`Lifted timeout for @${targetUsername}.`, "success");
+            try {
+                await apiFetch('/api/admin/moderation', {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'untimeout', targetUsername })
+                });
+                await refreshAdminModerationLists();
+                showToast(`Lifted timeout for @${targetUsername}.`, "success");
+            } catch (err) {
+                showAlert("Error", err.message);
+            }
         }
 
         async function toggleAdminRole(grant) {
             const targetUsername = getAdminTargetCleanUsername();
             if (!targetUsername) return showAlert("Admin Action", "Please enter a target username.");
 
-            const { error } = await supabaseClient.from('profiles').update({ is_admin: grant ? 1 : 0 }).eq('username', targetUsername);
-            if (error) showAlert("Error", error.message);
-            else {
+            try {
+                await apiFetch('/api/admin/role', {
+                    method: 'POST',
+                    body: JSON.stringify({ username: targetUsername, grant })
+                });
                 showToast(`Successfully ${grant ? 'granted admin to' : 'revoked admin from'} @${targetUsername}`, "success");
                 refreshAdminStats();
+            } catch (err) {
+                showAlert("Error", err.message);
             }
         }
 
@@ -2682,12 +2575,16 @@
             const confirmed = await showConfirm("Purge User Messages", `Delete all messages sent by @${targetUsername}?`, "Purge Messages", true);
             if (!confirmed) return;
 
-            const { error } = await supabaseClient.from('chat_messages').delete().eq('username', targetUsername);
-            if (error) showAlert("Error", error.message);
-            else {
+            try {
+                await apiFetch('/api/admin/purge-user', {
+                    method: 'POST',
+                    body: JSON.stringify({ username: targetUsername })
+                });
                 showToast(`Messages purged for @${targetUsername}`, "success");
                 loadChannelMessages();
                 refreshAdminStats();
+            } catch (err) {
+                showAlert("Error", err.message);
             }
         }
 
@@ -2701,19 +2598,17 @@
             const confirmed = await showConfirm("Delete Account", `Permanently delete @${targetUsername} and all of their messages & friends?`, "Delete Account", true);
             if (!confirmed) return;
 
-            const { data: targetProfile } = await supabaseClient.from('profiles').select('id').eq('username', targetUsername).maybeSingle();
-            await supabaseClient.from('chat_messages').delete().eq('username', targetUsername);
-            if (targetProfile && targetProfile.id) {
-                await supabaseClient.from('friends').delete().or(`user_id.eq.${targetProfile.id},friend_id.eq.${targetProfile.id}`);
-            }
-            const { error } = await supabaseClient.from('profiles').delete().eq('username', targetUsername);
-
-            if (error) showAlert("Error", error.message);
-            else {
+            try {
+                await apiFetch('/api/admin/delete-user', {
+                    method: 'POST',
+                    body: JSON.stringify({ username: targetUsername })
+                });
                 userProfileCache.delete(targetUsername);
                 allKnownUsers.delete(targetUsername);
                 showToast(`User @${targetUsername} deleted`, "success");
                 refreshAdminStats();
+            } catch (err) {
+                showAlert("Error", err.message);
             }
         }
 
@@ -2721,19 +2616,22 @@
             const text = document.getElementById('admin-announcement-text').value.trim();
             if (!text) return showAlert("Announcement Error", "Write announcement content before posting.");
 
-            const { error } = await supabaseClient.from('chat_messages').insert([{
-                user_id: currentUser.id,
-                username: currentUser.username,
-                channel_id: 'announcements',
-                message: `📢 GLOBAL SYSTEM ANNOUNCEMENT:\n${text}`
-            }]);
-
-            if (error) showAlert("Error", error.message);
-            else {
+            try {
+                await apiFetch('/api/messages', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        channel_id: 'announcements',
+                        message: `📢 GLOBAL SYSTEM ANNOUNCEMENT:\n${text}`,
+                        hardwareId: deviceHardwareId,
+                        storageId: deviceStorageId
+                    })
+                });
                 showToast("Global announcement posted!", "success");
                 document.getElementById('admin-announcement-text').value = '';
                 if (activeChannel === 'announcements') loadChannelMessages();
                 refreshAdminStats();
+            } catch (err) {
+                showAlert("Error", err.message);
             }
         }
 
@@ -2741,12 +2639,16 @@
             const confirmed = await showConfirm("Clear Channel", `Purge every message in #${activeChannel}? This cannot be undone.`, "Clear Channel", true);
             if (!confirmed) return;
 
-            const { error } = await supabaseClient.from('chat_messages').delete().eq('channel_id', activeChannel);
-            if (error) showAlert("Error", error.message);
-            else {
+            try {
+                await apiFetch('/api/admin/purge-channel', {
+                    method: 'POST',
+                    body: JSON.stringify({ channelId: activeChannel })
+                });
                 showToast(`Cleared channel #${activeChannel}`, "success");
                 loadChannelMessages();
                 refreshAdminStats();
+            } catch (err) {
+                showAlert("Error", err.message);
             }
         }
 
@@ -2760,15 +2662,21 @@
             const reason = document.getElementById('report-reason-input').value.trim();
             if (!reason) return showAlert("Report Notice", "Provide a reason for reporting.");
 
-            await supabaseClient.from('reports').insert([{
-                reporter_username: currentUser ? currentUser.username : 'Guest',
-                target_type: activeReportTarget.targetType,
-                target_id: String(activeReportTarget.targetId),
-                reason
-            }]);
-
-            showToast("Report submitted to system admins", "success");
-            document.getElementById('report-modal').classList.add('hidden');
+            try {
+                await apiFetch('/api/reports', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        reporter_username: currentUser ? currentUser.username : 'Guest',
+                        target_type: activeReportTarget.targetType,
+                        target_id: String(activeReportTarget.targetId),
+                        reason
+                    })
+                });
+                showToast("Report submitted to system admins", "success");
+                document.getElementById('report-modal').classList.add('hidden');
+            } catch (err) {
+                showToast(err.message, "error");
+            }
         });
 
         document.getElementById('report-user-btn').addEventListener('click', () => {
@@ -2844,29 +2752,20 @@
 
             const dmChannelId = getDMChannelID(currentUser.username, targetUsername);
             const invitePayloadStr = `[INVITE:${targetChanId}:${targetChanName}]`;
-            const sbPrefix = isCurrentDeviceShadowbanned ? '[SB]' : '';
 
-            const { error } = await supabaseClient.from('chat_messages').insert([{
-                user_id: currentUser.id,
-                username: currentUser.username,
-                channel_id: dmChannelId,
-                message: `${sbPrefix}Hey @${targetUsername}! I'm inviting you to join private channel ${targetChanName}.\n${invitePayloadStr}`
-            }]);
-
-            if (!isCurrentDeviceShadowbanned) {
-                broadcastSignaling.postMessage({
-                    type: 'channel_invite',
-                    sender: currentUser.username,
-                    target: targetUsername,
-                    channelId: targetChanId,
-                    channelName: targetChanName
+            try {
+                await apiFetch('/api/messages', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        channel_id: dmChannelId,
+                        message: `Hey @${targetUsername}! I'm inviting you to join private channel ${targetChanName}.\n${invitePayloadStr}`,
+                        hardwareId: deviceHardwareId,
+                        storageId: deviceStorageId
+                    })
                 });
-            }
-
-            if (error) {
-                showToast("Could not send invite.", "error");
-            } else {
                 showToast(`Private channel invite sent to @${targetUsername}!`, "success");
+            } catch (err) {
+                showToast("Could not send invite: " + err.message, "error");
             }
 
             document.getElementById('invite-modal').classList.add('hidden');
@@ -3028,7 +2927,7 @@
                     displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
                     displayScreenShareInPopup(displayStream, "Your Screen Share Preview");
                     isScreenSharing = true;
-                } catch(e) {}
+                } catch (e) {}
                 return;
             }
 
@@ -3219,13 +3118,12 @@
             document.getElementById('call-room-title').textContent = `Video Call: @${targetFriend}`;
             document.getElementById('call-type-badge').textContent = "1-on-1 P2P Call";
 
-            setupRoomSignaling(activeCallRoomId);
+            socket.emit('join_call_room', activeCallRoomId);
             setupPeerConnection(targetFriend, false);
 
             if (!isCurrentDeviceShadowbanned) {
-                supabaseClient.channel(`user-signal:${targetFriend}`).send({
-                    type: 'broadcast',
-                    event: 'signal',
+                socket.emit('user_signal', {
+                    targetUsername: targetFriend,
                     payload: {
                         type: 'offer',
                         callerUsername: currentUser.username,
@@ -3263,7 +3161,7 @@
                 });
             }
 
-            setupRoomSignaling(channelId);
+            socket.emit('join_call_room', channelId);
             setupCallUIState();
             playChime('join');
             updateChannelHeaderControls();
@@ -3284,47 +3182,10 @@
             }
         }
 
-        function setupRoomSignaling(roomId) {
-            if (roomSignalingChannel) {
-                try { supabaseClient.removeChannel(roomSignalingChannel); } catch(e) {}
-            }
-
-            roomSignalingChannel = supabaseClient.channel(`room-signal:${roomId}`);
-            roomSignalingChannel.on('broadcast', { event: 'room-event' }, async ({ payload }) => {
-                if (!isCallActive || !payload || payload.sender === currentUser.username) return;
-                if (payload.target && payload.target !== currentUser.username) return;
-
-                if (payload.type === 'user_joined_call') {
-                    peerMediaStates.set(payload.username, { micMuted: false, camMuted: false, displayName: payload.displayName, avatarUrl: payload.avatarUrl });
-                    if (peerConnections.has(payload.username)) {
-                        try { peerConnections.get(payload.username).close(); } catch(e) {}
-                        peerConnections.delete(payload.username);
-                        iceCandidateQueues.delete(payload.username);
-                    }
-                    setupPeerConnection(payload.username, true);
-                } else if (payload.type === 'offer') {
-                    peerMediaStates.set(payload.sender, { micMuted: false, camMuted: false, displayName: payload.senderDisplayName, avatarUrl: payload.senderAvatarUrl });
-                    await handleIncomingOffer(payload.sender, payload.offer);
-                } else if (payload.type === 'answer') {
-                    await handleIncomingAnswer(payload.sender, payload.answer);
-                } else if (payload.type === 'ice-candidate') {
-                    await handleIncomingIceCandidate(payload.sender, payload.candidate);
-                } else if (payload.type === 'media_state_change') {
-                    const state = peerMediaStates.get(payload.sender) || {};
-                    state.micMuted = payload.micMuted;
-                    state.camMuted = payload.camMuted;
-                    peerMediaStates.set(payload.sender, state);
-                    renderVideoGrid();
-                } else if (payload.type === 'user_left_call') {
-                    removePeerConnection(payload.sender);
-                }
-            }).subscribe();
-        }
-
         function sendRoomSignal(payload) {
-            if (!roomSignalingChannel) return;
+            if (!activeCallRoomId || !currentUser) return;
             payload.sender = currentUser.username;
-            roomSignalingChannel.send({ type: 'broadcast', event: 'room-event', payload });
+            socket.emit('room_signal', { roomId: activeCallRoomId, payload });
         }
 
         function setupPeerConnection(peerUsername, createOfferNow = false) {
@@ -3391,7 +3252,6 @@
         async function handleIncomingOffer(peerUsername, offer) {
             const pc = setupPeerConnection(peerUsername, false);
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
-            
             await processBufferedIceCandidates(peerUsername);
 
             const answer = await pc.createAnswer();
@@ -3417,7 +3277,7 @@
             if (pc && pc.remoteDescription && pc.remoteDescription.type) {
                 try {
                     await pc.addIceCandidate(new RTCIceCandidate(candidate));
-                } catch(e) {}
+                } catch (e) {}
             } else {
                 const queue = iceCandidateQueues.get(peerUsername) || [];
                 queue.push(candidate);
@@ -3433,7 +3293,7 @@
                 const candidate = queue.shift();
                 try {
                     await pc.addIceCandidate(new RTCIceCandidate(candidate));
-                } catch(e) {}
+                } catch (e) {}
             }
         }
 
@@ -3557,29 +3417,8 @@
                     updateChannelHeaderControls();
                     showToast(`🟢 Group call active in ${data.channelName}`, "info");
                 }
-            } else if (data.type === 'channel_invite' && currentUser && data.target === currentUser.username) {
-                customChannelsSet.add(data.channelId);
-                channelNamesMap.set(data.channelId, data.channelName);
-                saveUserJoinedChannels();
-                loadChannels();
-                showToast(`📨 Received private invite to ${data.channelName}`, "success");
             }
         };
-
-        function listenToPersonalSignaling() {
-            personalSignalingChannel = supabaseClient.channel(`user-signal:${currentUser.username}`);
-            personalSignalingChannel.on('broadcast', { event: 'signal' }, async ({ payload }) => {
-                if (isCurrentDeviceShadowbanned || shadowbannedUsersSet.has(payload.callerUsername)) return;
-
-                if (payload.type === 'offer') {
-                    pendingOfferPayload = payload;
-                    document.getElementById('incoming-caller-text').textContent = `@${payload.callerUsername} is calling...`;
-                    document.getElementById('incoming-call-modal').classList.remove('hidden');
-                } else if (payload.type === 'end-call') {
-                    endActiveVideoCall(false);
-                }
-            }).subscribe();
-        }
 
         document.getElementById('accept-call-video-btn').addEventListener('click', () => acceptIncomingCall(true));
         document.getElementById('accept-call-audio-btn').addEventListener('click', () => acceptIncomingCall(false));
@@ -3600,7 +3439,7 @@
 
             document.getElementById('call-room-title').textContent = `Video Call: @${payload.callerUsername}`;
             document.getElementById('call-type-badge').textContent = "1-on-1 P2P Call";
-            setupRoomSignaling(activeCallRoomId);
+            socket.emit('join_call_room', activeCallRoomId);
             setupPeerConnection(payload.callerUsername, false);
 
             setupCallUIState();
@@ -3619,9 +3458,8 @@
         document.getElementById('reject-call-btn').addEventListener('click', () => {
             document.getElementById('incoming-call-modal').classList.add('hidden');
             if (pendingOfferPayload) {
-                supabaseClient.channel(`user-signal:${pendingOfferPayload.callerUsername}`).send({
-                    type: 'broadcast',
-                    event: 'signal',
+                socket.emit('user_signal', {
+                    targetUsername: pendingOfferPayload.callerUsername,
                     payload: { type: 'end-call' }
                 });
             }
@@ -3659,12 +3497,15 @@
             if (notifyPeer && isCallActive) {
                 sendRoomSignal({ type: 'user_left_call', sender: currentUser ? currentUser.username : 'Guest' });
                 if (activeCallTarget) {
-                    supabaseClient.channel(`user-signal:${activeCallTarget}`).send({
-                        type: 'broadcast',
-                        event: 'signal',
+                    socket.emit('user_signal', {
+                        targetUsername: activeCallTarget,
                         payload: { type: 'end-call' }
                     });
                 }
+            }
+
+            if (activeCallRoomId) {
+                socket.emit('leave_call_room', activeCallRoomId);
             }
 
             playChime('leave');
@@ -3682,11 +3523,6 @@
             peerConnections.clear();
             iceCandidateQueues.clear();
             peerMediaStates.clear();
-
-            if (roomSignalingChannel) {
-                try { supabaseClient.removeChannel(roomSignalingChannel); } catch(e) {}
-                roomSignalingChannel = null;
-            }
 
             if (callTimerInterval) clearInterval(callTimerInterval);
             if (audioVUInterval) clearInterval(audioVUInterval);
@@ -3849,7 +3685,7 @@
 
                 if (audioVUInterval) clearInterval(audioVUInterval);
                 audioVUInterval = setInterval(updateAudioVU, 80);
-            } catch(e) {}
+            } catch (e) {}
         }
 
         function updateAudioVU() {
@@ -3898,13 +3734,14 @@
             filePreview.classList.add('hidden');
         });
 
-        async function fileToBase64(file) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.readAsDataURL(file);
-                reader.onload = () => resolve(reader.result);
-                reader.onerror = error => reject(error);
+        async function uploadFileToBackend(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            const res = await apiFetch('/api/upload', {
+                method: 'POST',
+                body: formData
             });
+            return res.url;
         }
 
         function setReplyTarget(msgId, username, text) {
@@ -3974,13 +3811,16 @@
                 if (!newContent) return;
                 const fullText = sbPrefix + replyPrefix + newContent;
 
-                const { error } = await supabaseClient.from('chat_messages').update({ message: fullText }).eq('id', msgId);
-                if (error) {
-                    showToast("Failed to edit message", "error");
-                } else {
+                try {
+                    await apiFetch(`/api/messages/${encodeURIComponent(msgId)}`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ message: fullText })
+                    });
                     showToast("Message edited", "success");
                     await updateMessageUIContent(msgId, fullText, true);
                     editForm.remove();
+                } catch (err) {
+                    showToast(err.message, "error");
                 }
             };
         }
@@ -3989,12 +3829,12 @@
             const confirmed = await showConfirm("Delete Message", "Are you sure you want to delete this message?", "Delete", true);
             if (!confirmed) return;
 
-            const { error } = await supabaseClient.from('chat_messages').delete().eq('id', msgId);
-            if (error) {
-                showToast("Failed to delete message", "error");
-            } else {
+            try {
+                await apiFetch(`/api/messages/${encodeURIComponent(msgId)}`, { method: 'DELETE' });
                 removeMessageUI(msgId);
                 showToast("Message deleted", "info");
+            } catch (err) {
+                showToast(err.message, "error");
             }
         }
 
@@ -4211,6 +4051,8 @@
             }
         }
 
+        // --- PROFILE MODAL & AVATAR CROPPER ---
+
         document.getElementById('open-profile-btn').addEventListener('click', () => {
             document.getElementById('edit-display-name').value = currentUser.display_name || currentUser.username;
             document.getElementById('edit-pronouns').value = currentUser.pronouns || getSavedLocalPronouns(currentUser.username) || '';
@@ -4223,28 +4065,21 @@
             document.getElementById('profile-background-size-value').textContent = `${currentUser.profile_background_size || 100}%`;
             document.getElementById('message-background-input').value = '';
             document.getElementById('profile-background-input').value = '';
-            document.getElementById('message-background-input').dataset.clear = 'false';
-            document.getElementById('profile-background-input').dataset.clear = 'false';
+            pendingMessageBackgroundUrl = currentUser.message_background_url || '';
+            pendingProfileBackgroundUrl = currentUser.profile_background_url || '';
 
-            pfpImg = null;
-            pfpZoom = 1;
-            pfpOffsetX = 0;
-            pfpOffsetY = 0;
             pfpModified = false;
-            document.getElementById('pfp-crop-zoom').value = 1;
+            pfpImg = null;
+            resetPfpZoomAndCenter(false);
 
             if (currentUser.avatar_url) {
-                const existingImg = new Image();
-                existingImg.crossOrigin = 'anonymous';
-                existingImg.onload = () => {
-                    pfpImg = existingImg;
-                    drawPfpCrop();
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+                img.onload = () => {
+                    pfpImg = img;
+                    resetPfpZoomAndCenter(false);
                 };
-                existingImg.onerror = () => {
-                    pfpImg = null;
-                    drawPfpCrop();
-                };
-                existingImg.src = currentUser.avatar_url;
+                img.src = currentUser.avatar_url;
             } else {
                 drawPfpCrop();
             }
@@ -4256,195 +4091,222 @@
             profileModal.classList.add('hidden');
         });
 
-        document.getElementById('message-background-input').addEventListener('change', e => { if (e.target.files.length) e.target.dataset.clear = 'false'; });
-        document.getElementById('profile-background-input').addEventListener('change', e => { if (e.target.files.length) e.target.dataset.clear = 'false'; });
-        document.getElementById('message-background-size').addEventListener('input', e => {
-            document.getElementById('message-background-size-value').textContent = `${e.target.value}%`;
+        let pendingMessageBackgroundUrl = '';
+        let pendingProfileBackgroundUrl = '';
+
+        document.getElementById('message-background-size').addEventListener('input', (event) => {
+            document.getElementById('message-background-size-value').textContent = `${event.target.value}%`;
         });
-        document.getElementById('profile-background-size').addEventListener('input', e => {
-            document.getElementById('profile-background-size-value').textContent = `${e.target.value}%`;
-        });
-        document.getElementById('clear-message-background').addEventListener('click', () => {
-            document.getElementById('message-background-input').dataset.clear = 'true';
-            document.getElementById('message-background-input').value = '';
-            showToast('Message background will be removed when you save.', 'info');
-        });
-        document.getElementById('clear-profile-background').addEventListener('click', () => {
-            document.getElementById('profile-background-input').dataset.clear = 'true';
-            document.getElementById('profile-background-input').value = '';
-            showToast('Profile background will be removed when you save.', 'info');
+        document.getElementById('profile-background-size').addEventListener('input', (event) => {
+            document.getElementById('profile-background-size-value').textContent = `${event.target.value}%`;
         });
 
-        async function uploadProfileBackground(file, prefix) {
-            if (!file) return null;
-            if (!file.type.startsWith('image/')) throw new Error('Please choose an image file.');
-            if (file.size > 8 * 1024 * 1024) throw new Error('Background images must be 8 MB or smaller.');
-            const extension = (file.name.split('.').pop() || 'jpg').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'jpg';
-            const path = `${prefix}/${currentUser.id}_${Date.now()}_${Math.random().toString(36).slice(2)}.${extension}`;
-            const { error } = await supabaseClient.storage.from('chat-media').upload(path, file, { upsert: true });
-            if (error) throw error;
-            return supabaseClient.storage.from('chat-media').getPublicUrl(path).data.publicUrl;
+        function readImageFile(input, callback) {
+            const file = input && input.files && input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => callback(typeof reader.result === 'string' ? reader.result : '');
+            reader.readAsDataURL(file);
+        }
+
+        document.getElementById('message-background-input').addEventListener('change', (event) => {
+            readImageFile(event.target, (dataUrl) => {
+                pendingMessageBackgroundUrl = dataUrl;
+                showToast('Message background selected.', 'info');
+            });
+        });
+        document.getElementById('profile-background-input').addEventListener('change', (event) => {
+            readImageFile(event.target, (dataUrl) => {
+                pendingProfileBackgroundUrl = dataUrl;
+                showToast('Profile background selected.', 'info');
+            });
+        });
+        document.getElementById('clear-message-background').addEventListener('click', () => {
+            pendingMessageBackgroundUrl = '';
+            document.getElementById('message-background-input').value = '';
+            showToast('Message background removed.', 'info');
+        });
+        document.getElementById('clear-profile-background').addEventListener('click', () => {
+            pendingProfileBackgroundUrl = '';
+            document.getElementById('profile-background-input').value = '';
+            showToast('Profile background removed.', 'info');
+        });
+
+        function refreshRenderedAuthorPronouns(username, pronounsText) {
+            if (!username) return;
+            document.querySelectorAll(`[data-author-pronouns="${CSS.escape(username)}"]`).forEach(badge => {
+                if (pronounsText) {
+                    badge.textContent = pronounsText;
+                    badge.classList.remove('hidden');
+                } else {
+                    badge.textContent = '';
+                    badge.classList.add('hidden');
+                }
+            });
         }
 
         document.getElementById('save-profile-btn').addEventListener('click', async () => {
-            const display_name = document.getElementById('edit-display-name').value.trim() || currentUser.username;
+            const displayName = document.getElementById('edit-display-name').value.trim();
             const pronouns = document.getElementById('edit-pronouns').value.trim();
             const bio = document.getElementById('edit-bio').value.trim();
             const standing = document.getElementById('edit-standing-select').value;
-            const custom_status = document.getElementById('edit-status-text').value.trim();
+            const customStatus = document.getElementById('edit-status-text').value.trim();
+            const messageBackgroundUrl = pendingMessageBackgroundUrl || null;
+            const profileBackgroundUrl = pendingProfileBackgroundUrl || null;
+            const messageBackgroundSize = Number(document.getElementById('message-background-size').value) || 100;
+            const profileBackgroundSize = Number(document.getElementById('profile-background-size').value) || 100;
 
-            let avatar_url = currentUser.avatar_url;
-
-            if (pfpImg && pfpModified) {
-                const canvas = document.getElementById('pfp-crop-canvas');
+            let newAvatarUrl = currentUser.avatar_url;
+            if (pfpModified && pfpImg) {
                 try {
-                    const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
-                    try {
-                        const filePath = `avatars/${currentUser.id}_${Date.now()}.jpg`;
-                        const res = await fetch(croppedDataUrl);
-                        const blob = await res.blob();
-
-                        const { error: uploadErr } = await supabaseClient.storage.from('chat-media').upload(filePath, blob, { upsert: true });
-                        if (!uploadErr) {
-                            const { data: urlData } = supabaseClient.storage.from('chat-media').getPublicUrl(filePath);
-                            avatar_url = urlData.publicUrl;
-                        } else {
-                            avatar_url = croppedDataUrl;
-                        }
-                    } catch(e) {
-                        avatar_url = croppedDataUrl;
-                    }
-                } catch (canvasSecurityErr) {
+                    const canvas = document.getElementById('pfp-crop-canvas');
+                    newAvatarUrl = canvas.toDataURL('image/png');
+                } catch (e) {
+                    showToast("Could not export cropped avatar.", "error");
                 }
             }
 
-            let message_background_url = document.getElementById('message-background-input').dataset.clear === 'true' ? null : (currentUser.message_background_url || null);
-            let profile_background_url = document.getElementById('profile-background-input').dataset.clear === 'true' ? null : (currentUser.profile_background_url || null);
-            const messageBackgroundFile = document.getElementById('message-background-input').files[0];
-            const profileBackgroundFile = document.getElementById('profile-background-input').files[0];
-            const message_background_size = Number(document.getElementById('message-background-size').value);
-            const profile_background_size = Number(document.getElementById('profile-background-size').value);
-
             try {
-                if (messageBackgroundFile) message_background_url = await uploadProfileBackground(messageBackgroundFile, 'message-backgrounds');
-                if (profileBackgroundFile) profile_background_url = await uploadProfileBackground(profileBackgroundFile, 'profile-backgrounds');
-            } catch (uploadError) {
-                return showAlert('Image Upload Error', uploadError.message || 'Could not upload your background image.');
-            }
+                const res = await apiFetch('/api/profiles/me', {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        display_name: displayName || currentUser.username,
+                        pronouns,
+                        bio,
+                        standing,
+                        custom_status: customStatus,
+                        avatar_url: newAvatarUrl,
+                        message_background_url: messageBackgroundUrl,
+                        message_background_size: messageBackgroundSize,
+                        profile_background_url: profileBackgroundUrl,
+                        profile_background_size: profileBackgroundSize
+                    })
+                });
 
-            let { error } = await supabaseClient.from('profiles').update({
-                display_name,
-                pronouns,
-                bio,
-                standing,
-                custom_status,
-                avatar_url,
-                message_background_url,
-                message_background_size,
-                profile_background_url,
-                profile_background_size
-            }).eq('id', currentUser.id);
-
-            if (error && error.message && error.message.toLowerCase().includes('pronouns')) {
-                const retry = await supabaseClient.from('profiles').update({
-                    display_name,
-                    bio,
-                    standing,
-                    custom_status,
-                    avatar_url,
-                    message_background_url,
-                    message_background_size,
-                    profile_background_url,
-                    profile_background_size
-                }).eq('id', currentUser.id);
-                error = retry.error;
-            }
-
-            if (!error) {
-                currentUser.display_name = display_name;
-                currentUser.pronouns = pronouns;
-                currentUser.bio = bio;
-                currentUser.custom_status = custom_status;
-                currentUser.avatar_url = avatar_url;
-                currentUser.message_background_url = message_background_url;
-                currentUser.message_background_size = message_background_size;
-                currentUser.profile_background_url = profile_background_url;
-                currentUser.profile_background_size = profile_background_size;
-                currentUser.standing = standing;
-                preferredStanding = standing;
+                currentUser = res.profile;
                 setSavedLocalPronouns(currentUser.username, pronouns);
                 userProfileCache.set(currentUser.username, currentUser);
+                refreshRenderedAuthorPronouns(currentUser.username, pronouns);
+
+                preferredStanding = standing;
+                updateStandingState(standing, true);
+                updateUserUI();
 
                 document.querySelectorAll(`[data-mention-username="${CSS.escape(currentUser.username)}"]`).forEach(el => {
-                    el.textContent = `@${display_name}`;
+                    el.textContent = `@${currentUser.display_name || currentUser.username}`;
                 });
 
-                document.querySelectorAll(`[data-author-pronouns="${CSS.escape(currentUser.username)}"]`).forEach(el => {
-                    if (pronouns) {
-                        el.textContent = pronouns;
-                        el.classList.remove('hidden');
-                    } else {
-                        el.textContent = '';
-                        el.classList.add('hidden');
-                    }
-                });
-
-                updateUserDisplayUI();
-                updateStandingState(standing, true);
                 profileModal.classList.add('hidden');
-                showToast("Profile settings updated!", "success");
-            } else {
-                showAlert("Error", "Failed to update profile: " + error.message);
+                showToast("Profile updated!", "success");
+            } catch (err) {
+                showToast("Error saving profile: " + err.message, "error");
             }
         });
 
+        async function showUserProfile(username) {
+            const prof = await fetchProfile(username, true);
+            const display = prof ? (prof.display_name || prof.username) : username;
+            const pronouns = prof && prof.pronouns ? prof.pronouns : getSavedLocalPronouns(username);
+            const bio = prof && prof.bio ? prof.bio : "No bio set yet.";
+            const status = prof && prof.custom_status ? `"${prof.custom_status}"` : "";
+            const avatar = prof ? prof.avatar_url : null;
+            const profileCard = document.getElementById('view-profile-card');
+            if (prof && prof.profile_background_url) {
+                const backgroundUrl = `url("${String(prof.profile_background_url).replace(/["\\\\]/g, '')}")`;
+                const backgroundSize = Math.max(50, Math.min(200, Number(prof.profile_background_size) || 100));
+                profileCard.style.backgroundImage = `linear-gradient(rgba(15, 23, 42, 0.72), rgba(15, 23, 42, 0.88)), ${backgroundUrl}`;
+                profileCard.style.backgroundSize = `auto, ${backgroundSize}% ${backgroundSize}%`;
+                profileCard.style.backgroundPosition = 'center, center';
+                profileCard.style.backgroundRepeat = 'no-repeat, no-repeat';
+            } else {
+                profileCard.style.backgroundImage = '';
+                profileCard.style.backgroundSize = '';
+                profileCard.style.backgroundPosition = '';
+                profileCard.style.backgroundRepeat = '';
+            }
+
+            document.getElementById('view-profile-dname').textContent = display;
+            document.getElementById('view-profile-uname').textContent = `@${username}`;
+
+            const pronounsEl = document.getElementById('view-profile-pronouns');
+            if (pronouns) {
+                pronounsEl.textContent = pronouns;
+                pronounsEl.classList.remove('hidden');
+            } else {
+                pronounsEl.textContent = '';
+                pronounsEl.classList.add('hidden');
+            }
+
+            document.getElementById('view-profile-status').textContent = status;
+            document.getElementById('view-profile-bio').textContent = bio;
+
+            const avatarEl = document.getElementById('view-profile-avatar');
+            if (avatar) {
+                avatarEl.innerHTML = `<img src="${escapeHTML(avatar)}" class="w-full h-full object-cover">`;
+            } else {
+                avatarEl.innerHTML = escapeHTML(display.charAt(0).toUpperCase());
+            }
+
+            document.getElementById('view-profile-modal').classList.remove('hidden');
+        }
+
+        // --- AUTHENTICATION ---
+
         document.getElementById('signup-btn').addEventListener('click', async () => {
+            if (isCurrentDeviceBanned) return;
             const username = document.getElementById('auth-username').value.trim();
-            const password = document.getElementById('auth-password').value;
-            if (!USERNAME_REGEX.test(username)) return showAuthError("Username can ONLY contain lowercase letters, numbers, _, and .");
-            if (!password || password.length < 3) return showAuthError("Password must be at least 3 characters.");
+            const password = document.getElementById('auth-password').value.trim();
+            if (!username || !password) return showAuthError("Enter username and password.");
 
-            const modStatus = await syncModerationStateFromServer(username);
-            if (modStatus.banned) return;
+            if (!USERNAME_REGEX.test(username)) {
+                return showAuthError("Username can ONLY contain lowercase letters, numbers, _ and . (no spaces or capitals).");
+            }
 
-            const password_hash = await hashPassword(password);
-            const userId = crypto.randomUUID();
-
-            const { error } = await supabaseClient.from('profiles').insert([{
-                id: userId,
-                username,
-                password_hash,
-                display_name: username,
-                standing: 'online'
-            }]);
-            if (error) return showAuthError(error.message);
-
-            initAuthenticatedSession({
-                id: userId,
-                username,
-                display_name: username,
-                pronouns: '',
-                avatar_url: null,
-                bio: '',
-                standing: 'online',
-                is_admin: 0
-            });
+            try {
+                const res = await apiFetch('/api/auth/signup', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        username,
+                        password,
+                        hardwareId: deviceHardwareId,
+                        storageId: deviceStorageId
+                    })
+                });
+                authToken = res.token;
+                localStorage.setItem('mesh_auth_token', authToken);
+                sessionLockChannel.postMessage({ type: 'LOGIN', user: res.profile.username });
+                await handleAuthSuccess(res.profile);
+            } catch (err) {
+                showAuthError(err.message);
+            }
         });
 
         document.getElementById('login-btn').addEventListener('click', async () => {
+            if (isCurrentDeviceBanned) return;
             const username = document.getElementById('auth-username').value.trim();
-            const password = document.getElementById('auth-password').value;
+            const password = document.getElementById('auth-password').value.trim();
             if (!username || !password) return showAuthError("Enter username and password.");
 
-            const modStatus = await syncModerationStateFromServer(username);
-            if (modStatus.banned) return;
+            const modCheck = await syncModerationStateFromServer(username);
+            if (modCheck.banned) return;
 
-            const password_hash = await hashPassword(password);
-
-            const { data: profile, error } = await supabaseClient.from('profiles').select('*').eq('username', username).maybeSingle();
-            if (error || !profile || profile.password_hash !== password_hash) return showAuthError("Invalid credentials.");
-
-            initAuthenticatedSession(profile);
+            try {
+                const res = await apiFetch('/api/auth/login', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        username,
+                        password,
+                        hardwareId: deviceHardwareId,
+                        storageId: deviceStorageId
+                    })
+                });
+                authToken = res.token;
+                localStorage.setItem('mesh_auth_token', authToken);
+                sessionLockChannel.postMessage({ type: 'LOGIN', user: res.profile.username });
+                await handleAuthSuccess(res.profile);
+            } catch (err) {
+                showAuthError(err.message);
+            }
         });
 
         function showAuthError(msg) {
@@ -4452,140 +4314,129 @@
             authError.classList.remove('hidden');
         }
 
-        async function hashPassword(password) {
-            const encoder = new TextEncoder();
-            const data = encoder.encode(password);
-            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
+        function performLogout(broadcast = true) {
+            if (isCallActive) endActiveVideoCall(true);
+            if (fastPollingInterval) clearInterval(fastPollingInterval);
+            if (timeoutCountdownInterval) clearInterval(timeoutCountdownInterval);
 
-        async function initAuthenticatedSession(profile, isNewLogin = true) {
-            const modCheck = await syncModerationStateFromServer(profile.username);
-            if (modCheck.banned) return;
-
-            hydrateProfilePronouns(profile);
-            currentUser = profile;
-            preferredStanding = profile.standing || 'online';
-            manualStanding = (document.hidden && preferredStanding === 'online') ? 'idle' : preferredStanding;
-            userProfileCache.set(profile.username, profile);
-            allKnownUsers.add(profile.username);
-
-            localStorage.setItem('mesh_chat_session', JSON.stringify({
-                id: profile.id,
-                username: profile.username,
-                loginTime: Date.now()
-            }));
-
-            if (isNewLogin) {
-                sessionLockChannel.postMessage({
-                    type: 'LOGIN',
-                    user: profile.username,
-                    userId: profile.id
-                });
-            }
-
-            updateUserDisplayUI();
-            authModal.classList.add('hidden');
-
-            await linkCurrentDeviceToUser(profile.username);
-            await touchUserLastActive();
-            await preloadAllUserProfiles(true);
-            runInactiveUsersAutoCleanup(false);
-
-            loadUserJoinedChannels();
-            processPendingInviteIfAny();
-            setupPresenceRealtime();
-            setupGlobalModerationRealtime();
-            listenToPersonalSignaling();
-            await loadFriends();
-            loadChannels();
-            await computeInitialUnreadCounts();
-            loadChannelMessages();
-            startFastPolling();
-            listenToRealtimeMessages();
-            enforceTimeoutUIState();
-
-            if (currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33') {
-                document.getElementById('open-admin-panel-btn').classList.remove('hidden');
-            }
-        }
-
-        function performLogout(notifyOtherTabs = true) {
-            if (isCallActive) {
-                endActiveVideoCall(true);
-            }
-
-            notifyImmediateDeparture();
-
-            if (presenceHeartbeatInterval) {
-                clearInterval(presenceHeartbeatInterval);
-                presenceHeartbeatInterval = null;
-            }
-            if (presenceReaperInterval) {
-                clearInterval(presenceReaperInterval);
-                presenceReaperInterval = null;
-            }
-
-            if (presenceChannel) {
-                try {
-                    supabaseClient.removeChannel(presenceChannel);
-                } catch(e) {}
-                presenceChannel = null;
-            }
-            if (personalSignalingChannel) {
-                try { supabaseClient.removeChannel(personalSignalingChannel); } catch(e) {}
-                personalSignalingChannel = null;
-            }
-            if (fastPollingInterval) {
-                clearInterval(fastPollingInterval);
-                fastPollingInterval = null;
+            if (currentUser && socket.connected) {
+                socket.emit('presence_update', { username: currentUser.username, standing: 'offline' });
             }
 
             currentUser = null;
+            authToken = null;
+            onlineUsersMap.clear();
+            userFriends.clear();
+            userProfileCache.clear();
+            activeTimeoutsMap.clear();
+            localStorage.removeItem('mesh_auth_token');
             localStorage.removeItem('mesh_chat_session');
 
-            if (notifyOtherTabs) {
+            if (broadcast) {
                 sessionLockChannel.postMessage({ type: 'LOGOUT' });
             }
 
             document.getElementById('open-admin-panel-btn').classList.add('hidden');
+            document.getElementById('current-user-display').textContent = 'Guest';
+            document.getElementById('current-user-status').textContent = '';
+            document.getElementById('user-avatar').textContent = '?';
+            chatBox.innerHTML = '';
+
             if (!isCurrentDeviceBanned) {
                 authModal.classList.remove('hidden');
             }
-            document.getElementById('auth-username').value = '';
-            document.getElementById('auth-password').value = '';
-            authError.classList.add('hidden');
         }
 
         document.getElementById('logout-btn').addEventListener('click', () => {
             performLogout(true);
-            showToast("Successfully logged out", "info");
         });
 
-        async function checkSavedSession() {
-            try {
-                const saved = localStorage.getItem('mesh_chat_session');
-                if (!saved) return;
+        async function handleAuthSuccess(profile) {
+            const modState = await syncModerationStateFromServer(profile.username);
+            if (modState.banned) return;
 
-                const parsed = JSON.parse(saved);
-                if (!parsed || (!parsed.id && !parsed.username)) return;
+            hydrateProfilePronouns(profile);
+            currentUser = profile;
+            preferredStanding = document.hidden ? 'online' : (profile.standing || 'online');
+            manualStanding = document.hidden ? 'idle' : (profile.standing || 'online');
 
-                let query = supabaseClient.from('profiles').select('*');
-                if (parsed.id) query = query.eq('id', parsed.id);
-                else query = query.eq('username', parsed.username);
-
-                const { data: profile, error } = await query.maybeSingle();
-                if (profile && !error) {
-                    await initAuthenticatedSession(profile, false);
-                    if (!isCurrentDeviceBanned) {
-                        showToast(`Welcome back, @${profile.username}!`, "success");
-                    }
-                } else {
-                    localStorage.removeItem('mesh_chat_session');
-                }
-            } catch(e) {
-                localStorage.removeItem('mesh_chat_session');
+            if (currentUser.username.toLowerCase() === 'sillygoobah33') {
+                currentUser.is_admin = 1;
             }
+            if (currentUser.is_admin === 1) {
+                document.getElementById('open-admin-panel-btn').classList.remove('hidden');
+            } else {
+                document.getElementById('open-admin-panel-btn').classList.add('hidden');
+            }
+
+            userProfileCache.set(currentUser.username, currentUser);
+            authModal.classList.add('hidden');
+            authError.classList.add('hidden');
+            updateUserUI();
+
+            loadUserJoinedChannels();
+            processPendingInviteIfAny();
+
+            socket.emit('register_user', {
+                username: currentUser.username,
+                standing: manualStanding
+            });
+
+            await preloadAllUserProfiles(true);
+            await loadFriends();
+            await loadChannels();
+            await computeInitialUnreadCounts();
+            saveLastReadTimestamp(activeChannel);
+
+            updateChannelHeaderControls();
+            checkAnnouncementsPermissions();
+            await loadChannelMessages();
+            startFastPollingFallback();
+        }
+
+        function updateUserUI() {
+            const display = currentUser.display_name || currentUser.username;
+            document.getElementById('current-user-display').textContent = display;
+            document.getElementById('current-user-status').textContent = currentUser.custom_status || '';
+            const avatarEl = document.getElementById('user-avatar');
+
+            if (currentUser.avatar_url) {
+                avatarEl.innerHTML = `<img src="${escapeHTML(currentUser.avatar_url)}" class="w-full h-full object-cover">`;
+            } else {
+                avatarEl.textContent = display.charAt(0).toUpperCase();
+            }
+
+            const dot = document.getElementById('self-standing-dot');
+            dot.className = "w-2.5 h-2.5 rounded-full inline-block ";
+            if (manualStanding === 'online') dot.classList.add('bg-emerald-500');
+            else if (manualStanding === 'idle') dot.classList.add('bg-amber-400');
+            else if (manualStanding === 'dnd') dot.classList.add('bg-rose-500');
+            else dot.classList.add('bg-slate-500');
+        }
+
+        // --- PRESENCE & STANDING ---
+
+        function updateStandingState(standing, updatePreference = true) {
+            if (!currentUser) return;
+            if (updatePreference) {
+                preferredStanding = standing;
+            }
+            manualStanding = standing;
+            currentUser.standing = standing;
+
+            if (standing === 'offline') {
+                onlineUsersMap.delete(currentUser.username);
+            } else {
+                onlineUsersMap.set(currentUser.username, standing);
+            }
+
+            socket.emit('presence_update', {
+                username: currentUser.username,
+                standing: manualStanding
+            });
+
+            updateUserUI();
+            schedulePresenceUIRender();
         }
 
         let presenceRenderPending = false;
@@ -4594,662 +4445,468 @@
             presenceRenderPending = true;
             requestAnimationFrame(() => {
                 presenceRenderPending = false;
-                updatePresenceUI();
+                updatePresenceCounterUI();
+                loadFriends();
             });
-        }
-
-        function handleIncomingPresenceSignal(username, standing) {
-            if (!username) return;
-            if (!standing || standing === 'offline') {
-                onlineUsersMap.delete(username);
-                lastUserHeartbeat.delete(username);
-            } else {
-                onlineUsersMap.set(username, standing);
-                lastUserHeartbeat.set(username, Date.now());
-            }
-            schedulePresenceUIRender();
-        }
-
-        function broadcastSelfPresencePing() {
-            if (!currentUser) return;
-            const standing = manualStanding || 'online';
-            handleIncomingPresenceSignal(currentUser.username, standing);
-
-            fastPresenceBroadcast.postMessage({
-                type: standing === 'offline' ? 'leave' : 'ping',
-                username: currentUser.username,
-                standing
-            });
-
-            if (presenceChannel) {
-                presenceChannel.send({
-                    type: 'broadcast',
-                    event: standing === 'offline' ? 'presence-leave' : 'presence-ping',
-                    payload: { username: currentUser.username, standing, ts: Date.now() }
-                });
-            }
-        }
-
-        function setupPresenceRealtime() {
-            if (presenceChannel) {
-                try { supabaseClient.removeChannel(presenceChannel); } catch(e) {}
-            }
-
-            presenceChannel = supabaseClient.channel('online-users', {
-                config: { presence: { key: currentUser.username } }
-            });
-
-            const processPresenceState = () => {
-                const state = presenceChannel.presenceState();
-                const now = Date.now();
-                const seenInPresence = new Set();
-
-                for (const key in state) {
-                    const userInfos = state[key];
-                    if (userInfos && userInfos.length > 0) {
-                        const latestInfo = userInfos[userInfos.length - 1];
-                        const uname = latestInfo.username || key;
-                        const st = latestInfo.standing || 'online';
-                        seenInPresence.add(uname);
-                        if (st === 'offline') {
-                            onlineUsersMap.delete(uname);
-                            lastUserHeartbeat.delete(uname);
-                        } else {
-                            onlineUsersMap.set(uname, st);
-                            lastUserHeartbeat.set(uname, now);
-                        }
-                    }
-                }
-
-                for (const [uname] of Array.from(onlineUsersMap.entries())) {
-                    if (uname === currentUser?.username) continue;
-                    if (!seenInPresence.has(uname)) {
-                        const lastHb = lastUserHeartbeat.get(uname) || 0;
-                        if (now - lastHb > 2000) {
-                            onlineUsersMap.delete(uname);
-                            lastUserHeartbeat.delete(uname);
-                        }
-                    }
-                }
-                schedulePresenceUIRender();
-            };
-
-            presenceChannel
-                .on('presence', { event: 'sync' }, processPresenceState)
-                .on('presence', { event: 'join' }, ({ key, newPresences }) => {
-                    if (newPresences && newPresences.length > 0) {
-                        const info = newPresences[newPresences.length - 1];
-                        handleIncomingPresenceSignal(info.username || key, info.standing || 'online');
-                    }
-                })
-                .on('presence', { event: 'leave' }, ({ key }) => {
-                    if (key && key !== currentUser?.username) {
-                        onlineUsersMap.delete(key);
-                        lastUserHeartbeat.delete(key);
-                        schedulePresenceUIRender();
-                    }
-                })
-                .on('broadcast', { event: 'presence-ping' }, ({ payload }) => {
-                    if (payload && payload.username) {
-                        handleIncomingPresenceSignal(payload.username, payload.standing || 'online');
-                    }
-                })
-                .on('broadcast', { event: 'presence-leave' }, ({ payload }) => {
-                    if (payload && payload.username && payload.username !== currentUser?.username) {
-                        onlineUsersMap.delete(payload.username);
-                        lastUserHeartbeat.delete(payload.username);
-                        schedulePresenceUIRender();
-                    }
-                })
-                .subscribe(async (status) => {
-                    if (status === 'SUBSCRIBED') {
-                        await presenceChannel.track({
-                            username: currentUser.username,
-                            standing: manualStanding,
-                            timestamp: Date.now()
-                        });
-                        broadcastSelfPresencePing();
-                    }
-                });
-
-            if (presenceHeartbeatInterval) clearInterval(presenceHeartbeatInterval);
-            presenceHeartbeatInterval = setInterval(() => {
-                broadcastSelfPresencePing();
-            }, 900);
-
-            if (presenceReaperInterval) clearInterval(presenceReaperInterval);
-            presenceReaperInterval = setInterval(() => {
-                const now = Date.now();
-                let changed = false;
-                for (const [uname] of Array.from(onlineUsersMap.entries())) {
-                    if (uname === currentUser?.username) continue;
-                    const lastHb = lastUserHeartbeat.get(uname) || 0;
-                    if (now - lastHb > 2500) {
-                        onlineUsersMap.delete(uname);
-                        lastUserHeartbeat.delete(uname);
-                        changed = true;
-                    }
-                }
-                if (changed) schedulePresenceUIRender();
-            }, 800);
-        }
-
-        async function updateStandingState(newStanding, isExplicitChoice = false) {
-            if (isExplicitChoice) {
-                preferredStanding = newStanding;
-            }
-            manualStanding = newStanding;
-            document.getElementById('self-standing-dot').className = `w-2.5 h-2.5 rounded-full inline-block ${getStandingColorClass(newStanding)}`;
-            broadcastSelfPresencePing();
-            if (presenceChannel && currentUser) {
-                await presenceChannel.track({
-                    username: currentUser.username,
-                    standing: newStanding,
-                    timestamp: Date.now()
-                });
-            }
-        }
-
-        function getStandingColorClass(standing) {
-            if (standing === 'online') return 'bg-emerald-500';
-            if (standing === 'idle') return 'bg-amber-400';
-            if (standing === 'dnd') return 'bg-rose-500';
-            return 'bg-slate-600';
         }
 
         function renderStandingBadgeDot(standing) {
-            return `<span class="w-2 h-2 rounded-full inline-block shrink-0 ${getStandingColorClass(standing)}"></span>`;
+            if (standing === 'online') return `<span class="w-2 h-2 rounded-full bg-emerald-400 inline-block shrink-0" title="Online"></span>`;
+            if (standing === 'idle') return `<span class="w-2 h-2 rounded-full bg-amber-400 inline-block shrink-0" title="Idle"></span>`;
+            if (standing === 'dnd') return `<span class="w-2 h-2 rounded-full bg-rose-500 inline-block shrink-0" title="Do Not Disturb"></span>`;
+            return `<span class="w-2 h-2 rounded-full bg-slate-600 inline-block shrink-0" title="Offline"></span>`;
         }
 
-        function updatePresenceUI() {
+        function updatePresenceCounterUI() {
             const count = onlineUsersMap.size;
             document.getElementById('online-counter-text').textContent = `${count} Online`;
-            const adminActiveStat = document.getElementById('admin-stat-active');
-            if (adminActiveStat) adminActiveStat.textContent = count;
-
-            if (!document.getElementById('presence-modal').classList.contains('hidden')) {
-                updatePresenceModalList();
-            }
-
-            loadFriends();
         }
 
         async function openPresenceModal() {
             await preloadAllUserProfiles(true);
-            updatePresenceModalList();
-            document.getElementById('presence-modal').classList.remove('hidden');
-        }
+            const onlineList = document.getElementById('presence-online-users');
+            const offlineList = document.getElementById('presence-offline-users');
+            onlineList.innerHTML = '';
+            offlineList.innerHTML = '';
 
-        function updatePresenceModalList() {
-            const onlineContainer = document.getElementById('presence-online-users');
-            const offlineContainer = document.getElementById('presence-offline-users');
-            onlineContainer.innerHTML = '';
-            offlineContainer.innerHTML = '';
-
-            let onlineCount = 0;
-            let offlineCount = 0;
-
-            userProfileCache.forEach((prof, uname) => {
-                const standing = onlineUsersMap.get(uname) || 'offline';
-                const dname = prof.display_name || uname;
-                const row = document.createElement('div');
-                row.className = "flex items-center justify-between p-2 rounded-lg bg-slate-950/70 border border-slate-800/80 text-xs";
-                row.innerHTML = `
-                    <div class="flex items-center gap-2 min-w-0">
-                        ${renderStandingBadgeDot(standing)}
-                        <div class="truncate">
-                            <span onclick="showUserProfile('${escapeHTML(uname)}'); document.getElementById('presence-modal').classList.add('hidden');" class="font-bold text-slate-200 cursor-pointer hover:underline">${escapeHTML(dname)}</span>
-                            <span class="text-[10px] text-indigo-400 ml-1">@${escapeHTML(uname)}</span>
+            const onlineNames = Array.from(onlineUsersMap.keys());
+            if (onlineNames.length === 0) {
+                onlineList.innerHTML = '<p class="text-xs text-slate-500 italic">No users online.</p>';
+            } else {
+                onlineNames.forEach(uname => {
+                    const standing = onlineUsersMap.get(uname) || 'online';
+                    const prof = userProfileCache.get(uname);
+                    const display = prof ? (prof.display_name || uname) : uname;
+                    const row = document.createElement('div');
+                    row.className = "flex items-center justify-between p-2 rounded-lg bg-slate-950 border border-slate-800 text-xs cursor-pointer hover:bg-slate-800 transition-colors";
+                    row.onclick = () => {
+                        document.getElementById('presence-modal').classList.add('hidden');
+                        showUserProfile(uname);
+                    };
+                    row.innerHTML = `
+                        <div class="flex items-center gap-2 min-w-0">
+                            ${renderStandingBadgeDot(standing)}
+                            <span class="font-bold text-slate-200 truncate">${escapeHTML(display)}</span>
+                            <span class="text-[10px] text-indigo-400 truncate">@${escapeHTML(uname)}</span>
                         </div>
-                    </div>
-                    <span class="text-[10px] text-slate-500 uppercase font-semibold shrink-0">${standing}</span>
-                `;
-
-                if (standing !== 'offline') {
-                    onlineContainer.appendChild(row);
-                    onlineCount++;
-                } else {
-                    offlineContainer.appendChild(row);
-                    offlineCount++;
-                }
-            });
-
-            if (onlineCount === 0) onlineContainer.innerHTML = '<p class="text-xs text-slate-500 italic">No users online.</p>';
-            if (offlineCount === 0) offlineContainer.innerHTML = '<p class="text-xs text-slate-500 italic">No offline users.</p>';
-        }
-
-        function updateUserDisplayUI() {
-            if (!currentUser) return;
-            document.getElementById('current-user-display').textContent = currentUser.display_name || currentUser.username;
-            const pronounsPart = currentUser.pronouns ? `(${currentUser.pronouns})` : '';
-            const statusPart = currentUser.custom_status || '';
-            document.getElementById('current-user-status').textContent = [pronounsPart, statusPart].filter(Boolean).join(' • ');
-            const avatarEl = document.getElementById('user-avatar');
-            if (currentUser.avatar_url) {
-                avatarEl.innerHTML = `<img src="${escapeHTML(currentUser.avatar_url)}" class="w-full h-full object-cover">`;
-            } else {
-                avatarEl.textContent = (currentUser.display_name || currentUser.username).charAt(0).toUpperCase();
-            }
-            document.getElementById('self-standing-dot').className = `w-2.5 h-2.5 rounded-full inline-block ${getStandingColorClass(manualStanding)}`;
-        }
-
-        async function fetchProfile(username) {
-            if (!username) return null;
-            if (userProfileCache.has(username)) return userProfileCache.get(username);
-            const { data } = await supabaseClient.from('profiles').select('*').eq('username', username).maybeSingle();
-            if (data) {
-                hydrateProfilePronouns(data);
-                userProfileCache.set(username, data);
-                allKnownUsers.add(username);
-            }
-            return data;
-        }
-
-        async function showUserProfile(username) {
-            const prof = await fetchProfile(username);
-            if (!prof) return;
-            document.getElementById('view-profile-dname').textContent = prof.display_name || prof.username;
-            document.getElementById('view-profile-uname').textContent = `@${prof.username}`;
-            const pronounsEl = document.getElementById('view-profile-pronouns');
-            if (prof.pronouns) {
-                pronounsEl.textContent = prof.pronouns;
-                pronounsEl.classList.remove('hidden');
-            } else {
-                pronounsEl.textContent = '';
-                pronounsEl.classList.add('hidden');
-            }
-            document.getElementById('view-profile-status').textContent = prof.custom_status || '';
-            document.getElementById('view-profile-bio').textContent = prof.bio || "No bio set.";
-            const profileCard = document.getElementById('view-profile-card');
-            if (prof.profile_background_url) {
-                const safeBackground = String(prof.profile_background_url).replace(/["\\\\]/g, '');
-                const backgroundSize = Math.max(50, Math.min(200, Number(prof.profile_background_size) || 100));
-                profileCard.style.backgroundImage = `linear-gradient(rgba(15, 23, 42, 0.72), rgba(15, 23, 42, 0.82)), url("${safeBackground}")`;
-                profileCard.style.backgroundSize = `cover, ${backgroundSize}% ${backgroundSize}%`;
-                profileCard.style.backgroundPosition = 'center, center';
-            } else {
-                profileCard.style.backgroundImage = '';
-                profileCard.style.backgroundSize = '';
-            }
-            const av = document.getElementById('view-profile-avatar');
-            if (prof.avatar_url) av.innerHTML = `<img src="${escapeHTML(prof.avatar_url)}" class="w-full h-full object-cover">`;
-            else av.textContent = (prof.display_name || prof.username).charAt(0).toUpperCase();
-            document.getElementById('view-profile-modal').classList.remove('hidden');
-        }
-
-        document.getElementById('add-friend-btn').addEventListener('click', async () => {
-            const target = document.getElementById('friend-username-input').value.trim().toLowerCase();
-            if (!target || target === currentUser.username) return;
-            const { data: targetProfile } = await supabaseClient.from('profiles').select('id, username').eq('username', target).maybeSingle();
-            if (!targetProfile) return showAlert("User Not Found", `No user found with username "@${target}".`);
-
-            const { data: existing } = await supabaseClient.from('friends')
-                .select('*')
-                .or(`and(user_id.eq.${currentUser.id},friend_id.eq.${targetProfile.id}),and(user_id.eq.${targetProfile.id},friend_id.eq.${currentUser.id})`);
-            if (existing && existing.length > 0) return showAlert("Friend Request", "Friend request already exists or you are already friends.");
-
-            await supabaseClient.from('friends').insert([{ user_id: currentUser.id, friend_id: targetProfile.id, status: 'pending' }]);
-            document.getElementById('friend-username-input').value = '';
-            loadFriends();
-            showToast(`Friend request sent to @${target}`, "success");
-        });
-
-        async function loadFriends() {
-            if (!currentUser) return;
-            const { data: friendships } = await supabaseClient
-                .from('friends')
-                .select('id, status, user_id, friend_id, sender:profiles!friends_user_id_fkey(username, display_name, avatar_url), receiver:profiles!friends_friend_id_fkey(username, display_name, avatar_url)')
-                .or(`user_id.eq.${currentUser.id},friend_id.eq.${currentUser.id}`);
-
-            const friendsList = document.getElementById('friends-list');
-            const requestsList = document.getElementById('requests-list');
-            const dmList = document.getElementById('dm-list');
-            
-            if (!friendsList) return;
-            friendsList.innerHTML = '';
-            requestsList.innerHTML = '';
-            dmList.innerHTML = '';
-            userFriends.clear();
-
-            let pendingCount = 0;
-            let acceptedCount = 0;
-
-            if (friendships) {
-                friendships.forEach(f => {
-                    const isSender = f.user_id === currentUser.id;
-                    const other = isSender ? f.receiver : f.sender;
-                    if (!other) return;
-
-                    if (f.status === 'pending') {
-                        pendingCount++;
-                        const reqDiv = document.createElement('div');
-                        reqDiv.className = "flex items-center justify-between text-xs bg-slate-950/70 p-2 rounded-lg border border-amber-500/30";
-                        if (isSender) {
-                            reqDiv.innerHTML = `<span class="text-slate-400 truncate">To: <b>${escapeHTML(other.display_name || other.username)}</b></span><span class="text-[10px] text-amber-400">Sent</span>`;
-                        } else {
-                            reqDiv.innerHTML = `<span class="text-slate-200 truncate">From: <b>${escapeHTML(other.display_name || other.username)}</b></span><button onclick="acceptFriend('${f.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer">Accept</button>`;
-                        }
-                        requestsList.appendChild(reqDiv);
-                    } else if (f.status === 'accepted') {
-                        acceptedCount++;
-                        userFriends.add(other.username);
-                        const otherStanding = onlineUsersMap.get(other.username) || 'offline';
-
-                        const div = document.createElement('div');
-                        div.className = "flex items-center justify-between text-xs bg-slate-950/60 p-1.5 rounded-lg border border-slate-800/80";
-                        div.innerHTML = `
-                            <span onclick="showUserProfile('${escapeHTML(other.username)}')" class="truncate font-medium text-slate-200 cursor-pointer hover:underline flex items-center gap-1.5">
-                                ${renderStandingBadgeDot(otherStanding)}
-                                <span>${escapeHTML(other.display_name || other.username)}</span>
-                            </span>
-                            <button onclick="openDM('${escapeHTML(other.username)}')" class="bg-indigo-600/30 hover:bg-indigo-600 text-indigo-300 hover:text-white px-2 py-0.5 rounded text-[10px] font-bold transition-colors cursor-pointer">DM</button>
-                        `;
-                        friendsList.appendChild(div);
-
-                        const dmChannelId = getDMChannelID(currentUser.username, other.username);
-                        const dmUnread = unreadCounts[dmChannelId] || 0;
-                        const unreadBadge = dmUnread > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full ml-1 shadow">${dmUnread}</span>` : '';
-
-                        const dmBtn = document.createElement('button');
-                        dmBtn.className = `channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center justify-between cursor-pointer ${activeChannel === dmChannelId ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`;
-                        dmBtn.innerHTML = `
-                            <span class="flex items-center gap-2 truncate">
-                                ${renderStandingBadgeDot(otherStanding)}
-                                <span class="truncate">@ ${escapeHTML(other.display_name || other.username)}</span>
-                            </span>
-                            ${unreadBadge}
-                        `;
-                        dmBtn.onclick = () => switchChannel(dmChannelId, `@ ${other.display_name || other.username}`);
-                        dmList.appendChild(dmBtn);
-                    }
+                        <span class="text-[10px] font-semibold uppercase text-slate-400">${escapeHTML(standing)}</span>
+                    `;
+                    onlineList.appendChild(row);
                 });
             }
 
-            if (pendingCount === 0) requestsList.innerHTML = `<p class="text-[11px] text-slate-500 italic px-2">No pending requests</p>`;
-            if (acceptedCount === 0) {
-                friendsList.innerHTML = `<p class="text-[11px] text-slate-500 italic px-1">No friends yet</p>`;
-                dmList.innerHTML = `<p class="text-[11px] text-slate-500 italic px-2">No active DMs</p>`;
+            const offlineNames = Array.from(allKnownUsers).filter(u => !onlineUsersMap.has(u));
+            if (offlineNames.length === 0) {
+                offlineList.innerHTML = '<p class="text-xs text-slate-500 italic">No offline users.</p>';
+            } else {
+                offlineNames.forEach(uname => {
+                    const prof = userProfileCache.get(uname);
+                    const display = prof ? (prof.display_name || uname) : uname;
+                    const row = document.createElement('div');
+                    row.className = "flex items-center justify-between p-2 rounded-lg bg-slate-950/50 border border-slate-800/50 text-xs text-slate-500 cursor-pointer hover:bg-slate-900 transition-colors";
+                    row.onclick = () => {
+                        document.getElementById('presence-modal').classList.add('hidden');
+                        showUserProfile(uname);
+                    };
+                    row.innerHTML = `
+                        <div class="flex items-center gap-2 min-w-0">
+                            ${renderStandingBadgeDot('offline')}
+                            <span class="truncate">${escapeHTML(display)}</span>
+                            <span class="text-[10px] truncate">@${escapeHTML(uname)}</span>
+                        </div>
+                        <span class="text-[10px]">Offline</span>
+                    `;
+                    offlineList.appendChild(row);
+                });
             }
 
-            if (activeChannel.startsWith('dm_')) {
-                checkAnnouncementsPermissions();
-            }
+            document.getElementById('presence-modal').classList.remove('hidden');
         }
 
-        async function acceptFriend(friendshipId) {
-            await supabaseClient.from('friends').update({ status: 'accepted' }).eq('id', friendshipId);
-            await loadFriends();
-            showToast("Friend request accepted!", "success");
+        // --- CHANNELS & DMs ---
+
+        function attachChannelButtonListeners(btn) {
+            const chanId = btn.getAttribute('data-channel');
+            const chanName = btn.getAttribute('data-name') || btn.textContent.trim();
+
+            btn.addEventListener('click', () => {
+                activeChannel = chanId;
+                document.getElementById('active-channel-title').textContent = chanName;
+                
+                unreadCounts[chanId] = 0;
+                saveLastReadTimestamp(chanId);
+
+                document.querySelectorAll('.channel-btn').forEach(b => {
+                    b.className = "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors flex items-center justify-between cursor-pointer";
+                });
+                btn.className = "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-between cursor-pointer";
+                
+                updateChannelHeaderControls();
+                checkAnnouncementsPermissions();
+                loadChannelMessages();
+                loadChannels();
+                loadFriends();
+            });
+
+            btn.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                if (chanId.startsWith('dm_') || chanId === 'announcements') return;
+                contextChannelId = chanId;
+                contextChannelName = chanName;
+                contextMenu.style.top = `${e.pageY}px`;
+                contextMenu.style.left = `${e.pageX}px`;
+                contextMenu.classList.remove('hidden');
+            });
         }
 
         function getDMChannelID(u1, u2) {
-            return 'dm_' + [u1, u2].sort().join('||');
-        }
-
-        function openDM(friendUsername) {
-            if (!userFriends.has(friendUsername)) {
-                return showAlert("Friends Only", "You can only Direct Message accepted friends.");
-            }
-            const dmId = getDMChannelID(currentUser.username, friendUsername);
-            const prof = userProfileCache.get(friendUsername);
-            const displayLabel = `@ ${prof ? (prof.display_name || friendUsername) : friendUsername}`;
-            switchChannel(dmId, displayLabel);
+            const sorted = [u1, u2].sort();
+            return `dm_${sorted[0]}||${sorted[1]}`;
         }
 
         async function createNewChannel() {
-            const name = await showPrompt("Create Private Channel", "Enter a name for your new private channel:", "e.g. gaming-lounge", "Create Channel");
+            const name = await showPrompt(
+                "Create Private Channel",
+                "Enter a name for your new private channel (only invited friends can see and join it):",
+                "e.g. secret-base or gaming-squad",
+                "Create Channel"
+            );
             if (!name) return;
-            const cleanId = name.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + Math.floor(1000 + Math.random() * 9000);
-            const fullDisplay = `# ${name.trim()}`;
+
+            const cleanName = name.toLowerCase().replace(/[^a-z0-9-_]/g, '');
+            if (!cleanName) return showAlert("Invalid Name", "Channel name must contain letters or numbers.");
             
-            customChannelsSet.add(cleanId);
-            channelNamesMap.set(cleanId, fullDisplay);
+            const randomSuffix = Math.random().toString(36).substring(2, 6);
+            const privId = `${cleanName}_${randomSuffix}`;
+            const displayName = `🔒 ${cleanName}`;
+
+            customChannelsSet.add(privId);
+            channelNamesMap.set(privId, displayName);
             saveUserJoinedChannels();
-            
             loadChannels();
-            switchChannel(cleanId, fullDisplay);
-            showToast(`Private channel ${fullDisplay} created! Invite friends to grant access.`, "success");
+
+            activeChannel = privId;
+            document.getElementById('active-channel-title').textContent = displayName;
+            updateChannelHeaderControls();
+            checkAnnouncementsPermissions();
+            loadChannelMessages();
+            showToast(`Private channel ${displayName} created!`, "success");
         }
 
         function loadChannels() {
             const list = document.getElementById('channel-list');
-            if (!list) return;
             list.innerHTML = '';
 
-            customChannelsSet.forEach(cid => {
-                const cname = channelNamesMap.get(cid) || `# ${cid}`;
-                const isSelected = activeChannel === cid;
-                const unreadCount = unreadCounts[cid] || 0;
-                const unreadBadge = unreadCount > 0 ? `<span class="bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full shadow">${unreadCount}</span>` : '';
+            customChannelsSet.forEach(chanId => {
+                const isActive = activeChannel === chanId;
+                const displayName = channelNamesMap.get(chanId) || `# ${chanId}`;
+                const unread = unreadCounts[chanId] || 0;
 
                 const btn = document.createElement('button');
-                btn.className = `channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center justify-between cursor-pointer ${isSelected ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`;
-                btn.innerHTML = `<span class="truncate">${escapeHTML(cname)}</span>${unreadBadge}`;
-                btn.onclick = () => switchChannel(cid, cname);
+                btn.setAttribute('data-channel', chanId);
+                btn.setAttribute('data-name', displayName);
+                btn.className = isActive 
+                    ? "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-between cursor-pointer"
+                    : "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors flex items-center justify-between cursor-pointer";
+                
+                const badgeHTML = (unread > 0 && !isActive)
+                    ? `<span class="bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-lg ml-1.5">${unread}</span>`
+                    : '';
 
-                btn.oncontextmenu = (e) => {
-                    e.preventDefault();
-                    contextChannelId = cid;
-                    contextChannelName = cname;
-                    contextMenu.style.left = `${e.clientX}px`;
-                    contextMenu.style.top = `${e.clientY}px`;
-                    contextMenu.classList.remove('hidden');
-                };
-
+                btn.innerHTML = `<span class="truncate">${escapeHTML(displayName)}</span> ${badgeHTML}`;
+                attachChannelButtonListeners(btn);
                 list.appendChild(btn);
             });
         }
 
-        function switchChannel(channelId, displayTitle) {
-            if (!isUserMemberOfChannelOrDM(channelId)) {
-                return showToast("You do not have access to this private channel.", "error");
-            }
+        async function fetchProfile(username, forceRefresh = false) {
+            if (!forceRefresh && userProfileCache.has(username)) return userProfileCache.get(username);
+            try {
+                const data = await apiFetch(`/api/profiles/${encodeURIComponent(username)}`);
+                if (data) {
+                    hydrateProfilePronouns(data);
+                    userProfileCache.set(username, data);
+                    allKnownUsers.add(username);
+                    return data;
+                }
+            } catch (e) {}
+            return null;
+        }
 
-            if (activeChannel) {
-                saveLastReadTimestamp(activeChannel);
-            }
-
-            activeChannel = channelId;
-            document.getElementById('active-channel-title').textContent = displayTitle || channelNamesMap.get(channelId) || `# ${channelId}`;
-            
-            loadChannels();
-            loadFriends();
-            updateChannelHeaderControls();
-            checkAnnouncementsPermissions();
-            loadChannelMessages();
+        function startFastPollingFallback() {
+            if (fastPollingInterval) clearInterval(fastPollingInterval);
+            fastPollingInterval = setInterval(async () => {
+                if (!currentUser || isCurrentDeviceBanned) return;
+                try {
+                    const messages = await apiFetch(`/api/messages/${encodeURIComponent(activeChannel)}`);
+                    if (Array.isArray(messages)) {
+                        for (const msg of messages) {
+                            if (isMessageShadowbannedForViewer(msg)) continue;
+                            if (!knownMessageIds.has(msg.id)) {
+                                knownMessageIds.add(msg.id);
+                                await appendMessageUI(msg);
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }, 3000);
         }
 
         async function loadChannelMessages() {
+            chatBox.innerHTML = '<div class="text-xs text-slate-600 italic text-center py-6">Syncing channel history...</div>';
             knownMessageIds.clear();
-            const currentChan = activeChannel;
-            
-            if (!isUserMemberOfChannelOrDM(currentChan)) {
-                chatBox.innerHTML = '<div class="flex flex-col items-center justify-center h-full text-slate-500 text-xs gap-2"><span>🔒 Private Channel</span><p>You must receive an invite link to view this channel.</p></div>';
-                return;
-            }
 
-            const { data: messages } = await supabaseClient
-                .from('chat_messages')
-                .select('*')
-                .eq('channel_id', currentChan)
-                .order('created_at', { ascending: true })
-                .limit(200);
-
-            if (activeChannel !== currentChan) return;
-
-            chatBox.innerHTML = '';
-            if (messages && messages.length > 0) {
-                for (const msg of messages) {
-                    if (!knownMessageIds.has(msg.id)) {
+            try {
+                const messages = await apiFetch(`/api/messages/${encodeURIComponent(activeChannel)}`);
+                chatBox.innerHTML = '';
+                if (Array.isArray(messages)) {
+                    for (const msg of messages) {
+                        if (isMessageShadowbannedForViewer(msg)) continue;
                         knownMessageIds.add(msg.id);
                         await appendMessageUI(msg);
                     }
                 }
+            } catch (err) {
+                chatBox.innerHTML = `<div class="text-xs text-rose-400 italic text-center py-6">Failed to load messages: ${escapeHTML(err.message)}</div>`;
             }
 
-            if (!unreadFirstMsgId[currentChan]) {
+            if (!unreadFirstMsgId[activeChannel]) {
                 chatBox.scrollTop = chatBox.scrollHeight;
-                clearUnreadForActiveChannel();
-            } else {
-                const divider = document.getElementById('new-messages-divider');
-                if (divider) divider.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
-        }
-
-        function startFastPolling() {
-            if (fastPollingInterval) clearInterval(fastPollingInterval);
-            fastPollingInterval = setInterval(async () => {
-                if (!currentUser || !activeChannel || !isUserMemberOfChannelOrDM(activeChannel)) return;
-                const { data: messages } = await supabaseClient
-                    .from('chat_messages')
-                    .select('*')
-                    .eq('channel_id', activeChannel)
-                    .order('created_at', { ascending: false })
-                    .limit(15);
-
-                if (messages) {
-                    const reversed = [...messages].reverse();
-                    for (const msg of reversed) {
-                        if (!knownMessageIds.has(msg.id)) {
-                            knownMessageIds.add(msg.id);
-                            await appendMessageUI(msg);
-                        }
-                    }
-                }
-            }, 3000);
-        }
-
-        function listenToRealtimeMessages() {
-            supabaseClient.channel('chat-updates')
-                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, async (payload) => {
-                    const msg = payload.new;
-                    if (!msg) return;
-
-                    if (isMessageShadowbannedForViewer(msg)) return;
-
-                    if (msg.channel_id === activeChannel) {
-                        if (!knownMessageIds.has(msg.id)) {
-                            knownMessageIds.add(msg.id);
-                            await appendMessageUI(msg);
-                            const threshold = chatBox.scrollHeight - chatBox.clientHeight - 150;
-                            if (chatBox.scrollTop >= threshold) {
-                                saveLastReadTimestamp(activeChannel);
-                            }
-                        }
-                    } else if (isUserMemberOfChannelOrDM(msg.channel_id) && msg.username !== currentUser?.username) {
-                        unreadCounts[msg.channel_id] = (unreadCounts[msg.channel_id] || 0) + 1;
-                        if (!unreadFirstMsgId[msg.channel_id]) unreadFirstMsgId[msg.channel_id] = msg.id;
-                        loadChannels();
-                        loadFriends();
-                    }
-                })
-                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages' }, async (payload) => {
-                    const msg = payload.new;
-                    if (!msg) return;
-                    if (msg.channel_id === activeChannel) {
-                        await updateMessageUIContent(msg.id, msg.message, true);
-                    }
-                })
-                .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'chat_messages' }, (payload) => {
-                    const oldMsg = payload.old;
-                    if (oldMsg && oldMsg.id) {
-                        removeMessageUI(oldMsg.id);
-                        knownMessageIds.delete(oldMsg.id);
-                    }
-                })
-                .subscribe();
         }
 
         document.getElementById('chat-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            if (!currentUser || !isUserMemberOfChannelOrDM(activeChannel)) return;
+            if (isCurrentDeviceBanned) return;
 
-            if (getActiveSelfTimeout()) {
-                return showToast("You cannot send messages while timed out.", "error");
-            }
-
-            if (activeChannel.startsWith('dm_')) {
-                const dmPeer = getDMTargetUsername(activeChannel);
-                if (dmPeer && !userFriends.has(dmPeer)) {
-                    return showToast("You must be accepted friends to send DMs.", "error");
-                }
+            const to = getActiveSelfTimeout();
+            if (to) {
+                return showAlert("Timed Out", `You cannot send messages while timed out (${to.reason}).`);
             }
 
             const isAnnouncements = activeChannel === 'announcements' || (channelNamesMap.get(activeChannel) || '').toLowerCase().includes('announcements');
             const isAdmin = currentUser && (currentUser.is_admin === 1 || currentUser.username.toLowerCase() === 'sillygoobah33');
             if (isAnnouncements && !isAdmin) {
-                return showToast("Only admins can post in announcements.", "error");
+                return showAlert("Channel Restricted", "Only administrators can send messages in announcements.");
             }
 
-            let messageText = msgInput.value.trim();
-            if (!messageText && !selectedFile) return;
+            if (activeChannel.startsWith('dm_')) {
+                const dmPeer = getDMTargetUsername(activeChannel);
+                if (dmPeer && !userFriends.has(dmPeer)) {
+                    return showAlert("Friends Only", `You must be accepted friends with @${dmPeer} to send Direct Messages.`);
+                }
+            }
+
+            let text = msgInput.value.trim();
+            if (!text && !selectedFile) return;
 
             if (replyTargetMsg) {
-                const encodedSnippet = encodeURIComponent(replyTargetMsg.text.substring(0, 80));
-                messageText = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodedSnippet}] ${messageText}`;
+                const cleanReplySnippet = replyTargetMsg.text.replace(/[\[\]]/g, '').substring(0, 60);
+                text = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodeURIComponent(cleanReplySnippet)}] ${text}`;
             }
 
-            if (isCurrentDeviceShadowbanned && !messageText.startsWith('[SB]')) {
-                messageText = `[SB]${messageText}`;
-            }
-
+            let mediaUrl = null;
             const fileToUpload = selectedFile;
+
             msgInput.value = '';
-            clearReplyTarget();
             selectedFile = null;
             mediaFileInput.value = '';
             filePreview.classList.add('hidden');
             mentionAutocomplete.classList.add('hidden');
+            clearReplyTarget();
 
-            let media_url = null;
-            if (fileToUpload) {
-                const fileExt = fileToUpload.name.split('.').pop();
-                const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-                const { error: uploadError } = await supabaseClient.storage.from('chat-media').upload(fileName, fileToUpload);
-
-                if (uploadError) {
-                    if (fileToUpload.size <= 3.5 * 1024 * 1024) {
-                        media_url = await fileToBase64(fileToUpload);
-                    } else {
-                        return showAlert("Upload Error", "File exceeds 3.5 MB fallback limit.");
-                    }
-                } else {
-                    const { data: urlData } = supabaseClient.storage.from('chat-media').getPublicUrl(fileName);
-                    media_url = urlData.publicUrl;
+            try {
+                if (fileToUpload) {
+                    mediaUrl = await uploadFileToBackend(fileToUpload);
                 }
-            }
 
-            const { data: insertedMsg, error } = await supabaseClient.from('chat_messages').insert([{
-                user_id: currentUser.id,
-                username: currentUser.username,
-                channel_id: activeChannel,
-                message: messageText,
-                media_url
-            }]).select().single();
+                const insertedMsg = await apiFetch('/api/messages', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        channel_id: activeChannel,
+                        message: text,
+                        media_url: mediaUrl,
+                        hardwareId: deviceHardwareId,
+                        storageId: deviceStorageId
+                    })
+                });
 
-            if (!error && insertedMsg) {
-                knownMessageIds.add(insertedMsg.id);
-                await appendMessageUI(insertedMsg);
-                saveLastReadTimestamp(activeChannel);
-                touchUserLastActive();
+                if (insertedMsg) {
+                    knownMessageIds.add(insertedMsg.id);
+                    await appendMessageUI(insertedMsg);
+                    saveLastReadTimestamp(activeChannel);
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                }
+            } catch (err) {
+                showToast("Message delivery error: " + err.message, "error");
             }
         });
 
-        function escapeHTML(str) {
-            return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
+        // --- FRIENDS & DMs ---
+
+        document.getElementById('add-friend-btn').addEventListener('click', async () => {
+            const targetUsername = document.getElementById('friend-username-input').value.trim().toLowerCase();
+            if (!targetUsername) return;
+            if (targetUsername === currentUser.username) return showAlert("Invalid Action", "You cannot add yourself as a friend.");
+
+            try {
+                await apiFetch('/api/friends/request', {
+                    method: 'POST',
+                    body: JSON.stringify({ username: targetUsername })
+                });
+                document.getElementById('friend-username-input').value = '';
+                showToast(`Friend request sent to @${targetUsername}!`, "success");
+                loadFriends();
+            } catch (err) {
+                showAlert("Friend Request", err.message);
+            }
+        });
+
+        async function loadFriends() {
+            if (!currentUser) return;
+            let friendships = [];
+            try {
+                friendships = await apiFetch('/api/friends');
+            } catch (e) {}
+
+            const reqList = document.getElementById('requests-list');
+            const friendsList = document.getElementById('friends-list');
+            const dmList = document.getElementById('dm-list');
+
+            reqList.innerHTML = '';
+            friendsList.innerHTML = '';
+            dmList.innerHTML = '';
+            userFriends.clear();
+
+            let hasPending = false;
+            let hasAccepted = false;
+
+            if (Array.isArray(friendships)) {
+                friendships.forEach(f => {
+                    const isSender = f.user_id === currentUser.id;
+                    const friendProfile = isSender ? f.receiver : f.sender;
+                    if (!friendProfile || !friendProfile.username) return;
+                    allKnownUsers.add(friendProfile.username);
+
+                    if (f.status === 'pending' && !isSender) {
+                        hasPending = true;
+                        const div = document.createElement('div');
+                        div.className = "flex items-center justify-between bg-slate-950 p-2 rounded-lg border border-amber-500/30 text-xs";
+                        div.innerHTML = `
+                            <span class="truncate text-slate-200">@${escapeHTML(friendProfile.username)}</span>
+                            <button onclick="acceptFriend('${f.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-[10px] font-bold px-2 py-0.5 rounded text-white cursor-pointer">Accept</button>
+                        `;
+                        reqList.appendChild(div);
+                    } else if (f.status === 'accepted') {
+                        hasAccepted = true;
+                        userFriends.add(friendProfile.username);
+                        const standing = onlineUsersMap.get(friendProfile.username) || 'offline';
+                        const dmId = getDMChannelID(currentUser.username, friendProfile.username);
+                        const unread = unreadCounts[dmId] || 0;
+
+                        const div = document.createElement('div');
+                        div.className = "flex items-center justify-between bg-slate-950/60 p-1.5 rounded-lg border border-slate-800/80 text-xs";
+                        div.innerHTML = `
+                            <div class="flex items-center gap-1.5 truncate cursor-pointer hover:underline" onclick="showUserProfile('${escapeHTML(friendProfile.username)}')">
+                                ${renderStandingBadgeDot(standing)}
+                                <span class="truncate text-slate-300">@${escapeHTML(friendProfile.username)}</span>
+                            </div>
+                            <button onclick="openDM('${escapeHTML(friendProfile.username)}')" class="bg-indigo-600/30 hover:bg-indigo-600 text-[10px] text-indigo-300 hover:text-white font-bold px-2 py-0.5 rounded transition-colors cursor-pointer">Chat</button>
+                        `;
+                        friendsList.appendChild(div);
+
+                        const isActiveDm = activeChannel === dmId;
+                        const badgeHTML = (unread > 0 && !isActiveDm)
+                            ? `<span class="bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-lg ml-1.5">${unread}</span>`
+                            : '';
+
+                        const dmBtn = document.createElement('button');
+                        dmBtn.setAttribute('data-channel', dmId);
+                        dmBtn.setAttribute('data-name', `@${friendProfile.username}`);
+                        dmBtn.className = isActiveDm
+                            ? "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-between cursor-pointer"
+                            : "channel-btn w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors flex items-center justify-between cursor-pointer";
+                        
+                        dmBtn.innerHTML = `
+                            <div class="flex items-center gap-1.5 min-w-0">
+                                ${renderStandingBadgeDot(standing)}
+                                <span class="truncate">@${escapeHTML(friendProfile.username)}</span>
+                            </div>
+                            ${badgeHTML}
+                        `;
+                        attachChannelButtonListeners(dmBtn);
+                        dmList.appendChild(dmBtn);
+                    }
+                });
+            }
+
+            if (!hasPending) reqList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No pending requests</p>';
+            if (!hasAccepted) {
+                friendsList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No friends added</p>';
+                dmList.innerHTML = '<p id="no-dms-msg" class="text-[11px] text-slate-500 italic px-2">No active DMs</p>';
+            }
+            checkAnnouncementsPermissions();
         }
 
-        (async function bootstrapMeshChat() {
+        async function acceptFriend(friendshipId) {
+            try {
+                await apiFetch(`/api/friends/accept/${encodeURIComponent(friendshipId)}`, { method: 'POST' });
+                showToast("Friend request accepted!", "success");
+                loadFriends();
+            } catch (err) {
+                showToast(err.message, "error");
+            }
+        }
+
+        function openDM(friendUsername) {
+            if (!userFriends.has(friendUsername)) {
+                return showAlert("Friends Only", "You must be accepted friends to open a Direct Message.");
+            }
+            const dmId = getDMChannelID(currentUser.username, friendUsername);
+            activeChannel = dmId;
+            document.getElementById('active-channel-title').textContent = `@${friendUsername}`;
+
+            unreadCounts[dmId] = 0;
+            saveLastReadTimestamp(dmId);
+
+            updateChannelHeaderControls();
+            checkAnnouncementsPermissions();
+            loadChannelMessages();
+            loadChannels();
+            loadFriends();
+        }
+
+        function escapeHTML(str) {
+            return String(str || '').replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            await initDeviceIdentity();
             setupPfpCropper();
             setupChatMentionAutocomplete();
             setupAdminTargetAutocomplete();
             checkInviteLinkInUrl();
-            await initDeviceIdentity();
-            const preAuthMod = await syncModerationStateFromServer(null);
-            if (!preAuthMod.banned) {
-                await checkSavedSession();
+            loadChannels();
+            updateChannelHeaderControls();
+            checkAnnouncementsPermissions();
+
+            const modCheck = await syncModerationStateFromServer();
+            if (modCheck.banned) return;
+
+            if (authToken) {
+                try {
+                    const res = await apiFetch('/api/auth/me');
+                    if (res && res.profile) {
+                        await handleAuthSuccess(res.profile);
+                        return;
+                    }
+                } catch (err) {
+                    authToken = null;
+                    localStorage.removeItem('mesh_auth_token');
+                }
             }
-        })();
+            authModal.classList.remove('hidden');
+        });
     </script>
 </body>
 </html>
