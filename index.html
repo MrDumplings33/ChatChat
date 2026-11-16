@@ -4065,7 +4065,7 @@
                 const backgroundUrl = `url("${String(profile.message_background_url).replace(/["\\\\]/g, '')}")`;
                 const backgroundSize = Math.max(50, Math.min(200, Number(profile.message_background_size) || 100));
                 msgEl.style.backgroundImage = `linear-gradient(rgba(15, 23, 42, 0.76), rgba(15, 23, 42, 0.76)), ${backgroundUrl}`;
-                msgEl.style.backgroundSize = `auto, ${backgroundSize}% auto`;
+                msgEl.style.backgroundSize = `auto, ${backgroundSize}% ${backgroundSize}%`;
                 msgEl.style.backgroundPosition = 'center, center';
                 msgEl.style.backgroundRepeat = 'no-repeat, no-repeat';
                 msgEl.style.backgroundColor = 'rgba(15, 23, 42, 0.8)';
@@ -4865,7 +4865,7 @@
                 const safeBackground = String(prof.profile_background_url).replace(/["\\\\]/g, '');
                 const backgroundSize = Math.max(50, Math.min(200, Number(prof.profile_background_size) || 100));
                 profileCard.style.backgroundImage = `linear-gradient(rgba(15, 23, 42, 0.72), rgba(15, 23, 42, 0.82)), url("${safeBackground}")`;
-                profileCard.style.backgroundSize = `cover, ${backgroundSize}% auto`;
+                profileCard.style.backgroundSize = `cover, ${backgroundSize}% ${backgroundSize}%`;
                 profileCard.style.backgroundPosition = 'center, center';
             } else {
                 profileCard.style.backgroundImage = '';
