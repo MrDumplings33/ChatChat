@@ -795,14 +795,13 @@
             <form id="chat-form" class="flex items-center gap-2 min-w-0">
                 <label for="media-file-input" id="media-file-label" title="Attach Media" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-2.5 rounded-xl text-xs font-bold cursor-pointer transition-colors border border-slate-700 shrink-0 flex items-center justify-center">📎</label>
                 <input type="file" id="media-file-input" class="hidden" accept="image/*,video/*,audio/*,.pdf,.txt,.doc,.docx,.zip">
-                <input type="text" id="msg-input" maxlength="500" placeholder="Broadcast message... (Type @ to mention)" autocomplete="off" class="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-xl px-3 sm:px-4 py-2.5 text-xs sm:text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
+                <input type="text" id="msg-input" placeholder="Broadcast message... (Type @ to mention)" autocomplete="off" class="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-xl px-3 sm:px-4 py-2.5 text-xs sm:text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
                 <button type="submit" id="send-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase px-4 sm:px-5 py-2.5 rounded-xl transition-colors cursor-pointer shrink-0">Send</button>
             </form>
         </footer>
     </main>
 
     <script>
-        // --- BACKEND CONFIGURATION ---
         const SERVER_ORIGIN = window.location.protocol === 'https:'
             ? "https://mesh-chat-local.duckdns.org:3000"
             : "http://mesh-chat-local.duckdns.org:3000";
@@ -810,62 +809,20 @@
         let authToken = localStorage.getItem('mesh_auth_token') || null;
         const socket = io(SERVER_ORIGIN, { autoConnect: true });
 
-        // If the backend cannot be reached or message history cannot be loaded,
-        // download the latest frontend from the project's GitHub raw URL once.
-        const GITHUB_FALLBACK_HTML_URL = 'https://raw.githubusercontent.com/MrDumplings33/ChatChat/refs/heads/main/index.html';
-        let githubFallbackDownloadStarted = false;
-
-        async function downloadGithubFallback(reason = 'The chat server could not be reached.') {
-            if (githubFallbackDownloadStarted) return;
-            githubFallbackDownloadStarted = true;
-
-            try {
-                const fallbackResponse = await fetch(GITHUB_FALLBACK_HTML_URL, {
-                    method: 'GET', mode: 'cors', cache: 'no-store', credentials: 'omit'
-                });
-                if (!fallbackResponse.ok) throw new Error(`GitHub returned HTTP ${fallbackResponse.status}`);
-
-                const htmlBlob = await fallbackResponse.blob();
-                if (!htmlBlob.size) throw new Error('GitHub returned an empty HTML file');
-
-                const blobUrl = URL.createObjectURL(new Blob([htmlBlob], { type: 'text/html;charset=utf-8' }));
-                const downloadLink = document.createElement('a');
-                downloadLink.href = blobUrl;
-                downloadLink.download = 'index.html';
-                downloadLink.style.display = 'none';
-                document.body.appendChild(downloadLink);
-                downloadLink.click();
-                downloadLink.remove();
-                setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-
-                console.warn('[Mesh Chat] Backend/history failed; downloaded GitHub fallback HTML.', reason);
-                if (typeof showToast === 'function') showToast('Server unavailable. Downloaded the latest index.html from GitHub.', 'error');
-            } catch (downloadError) {
-                console.error('[Mesh Chat] Could not download the GitHub fallback HTML:', downloadError);
-                // Last-resort fallback: open the raw file so it can be saved manually.
-                window.open(GITHUB_FALLBACK_HTML_URL, '_blank', 'noopener');
-                if (typeof showToast === 'function') showToast('Server and automatic fallback download failed. Opened the GitHub HTML instead.', 'error');
-            }
-        }
-
         async function apiFetch(endpoint, options = {}) {
             const headers = options.headers || {};
-            if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-            if (!(options.body instanceof FormData) && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-
-            let res;
-            try {
-                res = await fetch(`${SERVER_ORIGIN}${endpoint}`, { ...options, headers });
-            } catch (networkError) {
-                downloadGithubFallback(`Network request failed: ${endpoint}`);
-                throw networkError;
+            if (authToken) {
+                headers['Authorization'] = `Bearer ${authToken}`;
             }
-
+            if (!(options.body instanceof FormData) && !headers['Content-Type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+            const res = await fetch(`${SERVER_ORIGIN}${endpoint}`, {
+                ...options,
+                headers
+            });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) {
-                if (endpoint.startsWith('/api/messages/')) {
-                    downloadGithubFallback(`Message history request failed (${res.status}): ${endpoint}`);
-                }
                 throw new Error(data.error || `Server Error (${res.status})`);
             }
             return data;
@@ -882,11 +839,6 @@
 
         let selectedFile = null;
         let knownMessageIds = new Set();
-        const MESSAGE_PAGE_SIZE = 20;
-        let oldestLoadedMessageCursor = null;
-        let hasMoreOlderMessages = true;
-        let isLoadingOlderMessages = false;
-        let activeHistoryRequest = 0;
         let fastPollingInterval = null;
         let userProfileCache = new Map();
         let userFriends = new Set();
@@ -912,6 +864,78 @@
         let unreadCounts = {};
         let lastReadTimestamps = {};
         let unreadFirstMsgId = {};
+        let notificationAudioContext = null;
+        let notificationAudioUnlocked = false;
+
+        function unlockNotificationAudio() {
+            try {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextClass) return;
+                if (!notificationAudioContext) notificationAudioContext = new AudioContextClass();
+                if (notificationAudioContext.state === 'suspended') notificationAudioContext.resume();
+                notificationAudioUnlocked = true;
+            } catch (e) {}
+        }
+
+        function playNotificationPing(kind = 'message') {
+            try {
+                if (!notificationAudioContext || !notificationAudioUnlocked || notificationAudioContext.state !== 'running') return;
+                const ctx = notificationAudioContext;
+                const now = ctx.currentTime;
+                const frequencies = kind === 'mention' ? [880, 1175] : [660, 880];
+                frequencies.forEach((frequency, index) => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = frequency;
+                    gain.gain.setValueAtTime(0.0001, now + index * 0.11);
+                    gain.gain.exponentialRampToValueAtTime(0.12, now + index * 0.11 + 0.015);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, now + index * 0.11 + 0.16);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(now + index * 0.11);
+                    osc.stop(now + index * 0.11 + 0.18);
+                });
+            } catch (e) {}
+        }
+
+        document.addEventListener('pointerdown', unlockNotificationAudio, { once: true });
+        document.addEventListener('keydown', unlockNotificationAudio, { once: true });
+
+        function messageMentionsCurrentUser(message) {
+            if (!currentUser?.username || !message) return false;
+            const clean = String(message).replace(/^\[SB\]/, '').replace(/^\[REPLY:[^\]]+\]\s*/, '');
+            const escaped = currentUser.username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            return new RegExp(`(?:^|\\s)@${escaped}(?=$|[\\s,.:;!?])`, 'i').test(clean);
+        }
+
+        function updateTabFavicon() {
+            const favicon = document.getElementById('favicon');
+            if (!favicon) return;
+            const total = Object.values(unreadCounts).reduce((sum, count) => sum + (Number(count) || 0), 0);
+            const label = total > 99 ? '99+' : String(total);
+            const badge = total > 0 ? `<circle cx="18" cy="6" r="5.5" fill="#e11d48"/><text x="18" y="8.2" font-family="Arial,sans-serif" font-size="6.5" font-weight="700" text-anchor="middle" fill="#fff">${label}</text>` : '';
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#6366f1" d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>${badge}</svg>`;
+            favicon.href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+        }
+
+        function updateDirectMessageUnreadTotal() {
+            updateTabFavicon();
+            const heading = document.querySelector('#dm-list')?.previousElementSibling;
+            if (!heading) return;
+            const total = Object.entries(unreadCounts).reduce((sum, [channelId, count]) => sum + (channelId.startsWith('dm_') ? Number(count) || 0 : 0), 0);
+            let badge = heading.querySelector('[data-dm-unread-total]');
+            if (!badge && total > 0) {
+                badge = document.createElement('span');
+                badge.dataset.dmUnreadTotal = 'true';
+                badge.className = 'bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full ml-1';
+                heading.appendChild(badge);
+            }
+            if (badge) {
+                badge.textContent = total > 0 ? String(total) : '';
+                badge.classList.toggle('hidden', total === 0);
+            }
+        }
 
         let localStream = null;
         let displayStream = null;
@@ -954,8 +978,6 @@
         const broadcastSignaling = new BroadcastChannel('mesh_chat_signaling');
         const sessionLockChannel = new BroadcastChannel('mesh_session_lock');
 
-        // --- SOCKET.IO REALTIME LISTENERS ---
-
         socket.on('connect', () => {
             if (currentUser) {
                 socket.emit('register_user', {
@@ -963,11 +985,6 @@
                     standing: manualStanding || 'online'
                 });
             }
-        });
-
-        socket.on('connect_error', (error) => {
-            console.warn('[Mesh Chat] Backend socket connection failed:', error?.message || error);
-            downloadGithubFallback('Socket.IO could not connect to the chat backend.');
         });
 
         socket.on('presence_sync', (serverMap) => {
@@ -994,6 +1011,12 @@
         socket.on('chat_insert', async (msg) => {
             if (!msg) return;
             if (isMessageShadowbannedForViewer(msg)) return;
+            const isIncoming = msg.username !== currentUser?.username;
+            const isMention = isIncoming && messageMentionsCurrentUser(msg.message || '');
+            const isDM = String(msg.channel_id || '').startsWith('dm_');
+            if (isIncoming && (isMention || (isDM && msg.channel_id !== activeChannel))) {
+                playNotificationPing(isMention ? 'mention' : 'message');
+            }
 
             if (msg.channel_id === activeChannel) {
                 if (!knownMessageIds.has(msg.id)) {
@@ -1004,11 +1027,12 @@
                         saveLastReadTimestamp(activeChannel);
                     }
                 }
-            } else if (isUserMemberOfChannelOrDM(msg.channel_id) && msg.username !== currentUser?.username) {
+            } else if (isUserMemberOfChannelOrDM(msg.channel_id) && isIncoming) {
                 unreadCounts[msg.channel_id] = (unreadCounts[msg.channel_id] || 0) + 1;
                 if (!unreadFirstMsgId[msg.channel_id]) unreadFirstMsgId[msg.channel_id] = msg.id;
                 loadChannels();
                 loadFriends();
+                updateDirectMessageUnreadTotal();
             }
         });
 
@@ -1147,7 +1171,6 @@
         const profileModal = document.getElementById('profile-modal');
         const chatBox = document.getElementById('chat-box');
         const msgInput = document.getElementById('msg-input');
-        if (msgInput) { msgInput.maxLength = 500; msgInput.addEventListener('input', () => { if (msgInput.value.length > 500) msgInput.value = msgInput.value.slice(0, 500); }); }
         const mediaFileInput = document.getElementById('media-file-input');
         const filePreview = document.getElementById('file-preview');
         const filePreviewName = document.getElementById('file-preview-name');
@@ -2292,8 +2315,6 @@
                 }
             } catch (e) {}
         }
-
-        // --- ADMIN PANEL CONTROLS ---
 
         document.getElementById('admin-timeout-duration').addEventListener('change', (e) => {
             const customInput = document.getElementById('admin-timeout-custom-mins');
@@ -3847,7 +3868,7 @@
             const editForm = document.createElement('div');
             editForm.className = "inline-edit-form mt-2 space-y-2";
             editForm.innerHTML = `
-                <input type="text" maxlength="500" class="edit-input w-full bg-slate-950 border border-indigo-500 rounded-lg px-3 py-1.5 text-xs text-slate-100 focus:outline-none" value="${escapeHTML(cleanText)}">
+                <input type="text" class="edit-input w-full bg-slate-950 border border-indigo-500 rounded-lg px-3 py-1.5 text-xs text-slate-100 focus:outline-none" value="${escapeHTML(cleanText)}">
                 <div class="flex gap-1.5 justify-end text-[11px]">
                     <button type="button" class="save-edit-btn bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-3 py-1 rounded-md cursor-pointer">Save</button>
                     <button type="button" class="cancel-edit-btn bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-3 py-1 rounded-md cursor-pointer">Cancel</button>
@@ -3860,9 +3881,9 @@
 
             editForm.querySelector('.cancel-edit-btn').onclick = () => editForm.remove();
             editForm.querySelector('.save-edit-btn').onclick = async () => {
-                const newContent = inputEl.value.trim().slice(0, 500);
+                const newContent = inputEl.value.trim();
                 if (!newContent) return;
-                const fullText = (sbPrefix + replyPrefix + newContent).slice(0, 500);
+                const fullText = sbPrefix + replyPrefix + newContent;
 
                 try {
                     await apiFetch(`/api/messages/${encodeURIComponent(msgId)}`, {
@@ -4099,12 +4120,10 @@
             chatBox.appendChild(msgEl);
             
             const isScrolledNearBottom = chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight < 150;
-            if (!isLoadingOlderMessages && (unreadCounts[activeChannel] === 0 || !unreadFirstMsgId[activeChannel] || isScrolledNearBottom)) {
+            if (unreadCounts[activeChannel] === 0 || !unreadFirstMsgId[activeChannel] || isScrolledNearBottom) {
                 chatBox.scrollTop = chatBox.scrollHeight;
             }
         }
-
-        // --- PROFILE MODAL & AVATAR CROPPER ---
 
         document.getElementById('open-profile-btn').addEventListener('click', () => {
             document.getElementById('edit-display-name').value = currentUser.display_name || currentUser.username;
@@ -4303,8 +4322,6 @@
             document.getElementById('view-profile-modal').classList.remove('hidden');
         }
 
-        // --- AUTHENTICATION ---
-
         document.getElementById('signup-btn').addEventListener('click', async () => {
             if (isCurrentDeviceBanned) return;
             const username = document.getElementById('auth-username').value.trim();
@@ -4467,8 +4484,6 @@
             else dot.classList.add('bg-slate-500');
         }
 
-        // --- PRESENCE & STANDING ---
-
         function updateStandingState(standing, updatePreference = true) {
             if (!currentUser) return;
             if (updatePreference) {
@@ -4575,8 +4590,6 @@
 
             document.getElementById('presence-modal').classList.remove('hidden');
         }
-
-        // --- CHANNELS & DMs ---
 
         function attachChannelButtonListeners(btn) {
             const chanId = btn.getAttribute('data-channel');
@@ -4691,97 +4704,42 @@
             fastPollingInterval = setInterval(async () => {
                 if (!currentUser || isCurrentDeviceBanned) return;
                 try {
-                    // Fetch only messages newer than the newest item already rendered.
-                    const newest = chatBox.querySelector('[id^="msg-"]:last-of-type');
-                    const newestId = newest ? newest.id.slice(4) : '';
-                    const url = `/api/messages/${encodeURIComponent(activeChannel)}?limit=${MESSAGE_PAGE_SIZE}` + (newestId ? `&after=${encodeURIComponent(newestId)}` : '');
-                    const messages = await apiFetch(url);
+                    const messages = await apiFetch(`/api/messages/${encodeURIComponent(activeChannel)}`);
                     if (Array.isArray(messages)) {
                         for (const msg of messages) {
-                            if (isMessageShadowbannedForViewer(msg) || knownMessageIds.has(msg.id)) continue;
-                            knownMessageIds.add(msg.id);
-                            appendMessageUI(msg); // Do not serialize rendering behind profile/network lookups.
+                            if (isMessageShadowbannedForViewer(msg)) continue;
+                            if (!knownMessageIds.has(msg.id)) {
+                                knownMessageIds.add(msg.id);
+                                await appendMessageUI(msg);
+                            }
                         }
                     }
                 } catch (e) {}
             }, 3000);
         }
 
-        function getMessageCursor(msg) {
-            // created_at is stable across reloads; backend pagination should use this cursor.
-            return msg?.created_at || msg?.id || null;
-        }
-
-        async function loadOlderMessages() {
-            if (isLoadingOlderMessages || !hasMoreOlderMessages || !oldestLoadedMessageCursor) return;
-            isLoadingOlderMessages = true;
-            const oldHeight = chatBox.scrollHeight;
-            const oldTop = chatBox.scrollTop;
-            try {
-                const url = `/api/messages/${encodeURIComponent(activeChannel)}?limit=${MESSAGE_PAGE_SIZE}&before=${encodeURIComponent(oldestLoadedMessageCursor)}`;
-                const messages = await apiFetch(url);
-                if (!Array.isArray(messages) || messages.length === 0) {
-                    hasMoreOlderMessages = false;
-                    return;
-                }
-                const visible = messages.filter(msg => !isMessageShadowbannedForViewer(msg) && !knownMessageIds.has(msg.id));
-                if (visible.length === 0) {
-                    hasMoreOlderMessages = messages.length >= MESSAGE_PAGE_SIZE;
-                    return;
-                }
-                const fragment = document.createDocumentFragment();
-                const previousParent = chatBox;
-                // Build each message with the existing renderer, then move it to the top.
-                const beforeIds = new Set(knownMessageIds);
-                for (const msg of visible) {
-                    knownMessageIds.add(msg.id);
-                    await appendMessageUI(msg);
-                }
-                const added = Array.from(chatBox.children).filter(el => el.id && el.id.startsWith('msg-') && !beforeIds.has(el.id.slice(4)));
-                added.forEach(el => fragment.appendChild(el));
-                chatBox.insertBefore(fragment, chatBox.firstChild);
-                chatBox.scrollTop = oldTop + (chatBox.scrollHeight - oldHeight);
-                oldestLoadedMessageCursor = getMessageCursor(visible[0]);
-                hasMoreOlderMessages = messages.length >= MESSAGE_PAGE_SIZE;
-            } catch (err) {
-                showToast('Could not load older messages: ' + err.message, 'error');
-            } finally {
-                isLoadingOlderMessages = false;
-            }
-        }
-
         async function loadChannelMessages() {
-            const requestId = ++activeHistoryRequest;
-            const channelBeingLoaded = activeChannel;
-            chatBox.innerHTML = '<div class="text-xs text-slate-600 italic text-center py-6">Loading latest messages...</div>';
+            chatBox.innerHTML = '<div class="text-xs text-slate-600 italic text-center py-6">Syncing channel history...</div>';
             knownMessageIds.clear();
-            oldestLoadedMessageCursor = null;
-            hasMoreOlderMessages = true;
 
             try {
-                const messages = await apiFetch(`/api/messages/${encodeURIComponent(channelBeingLoaded)}?limit=${MESSAGE_PAGE_SIZE}`);
-                if (requestId !== activeHistoryRequest || channelBeingLoaded !== activeChannel) return;
+                const messages = await apiFetch(`/api/messages/${encodeURIComponent(activeChannel)}`);
                 chatBox.innerHTML = '';
-                const visible = Array.isArray(messages) ? messages.filter(msg => !isMessageShadowbannedForViewer(msg)) : [];
-                // Fetch/render the page concurrently; appendMessageUI still uses the existing UI renderer.
-                const beforeIds = new Set(knownMessageIds);
-                const rendered = await Promise.all(visible.map(async msg => {
-                    knownMessageIds.add(msg.id);
-                    await appendMessageUI(msg);
-                    return msg;
-                }));
-                if (rendered.length) oldestLoadedMessageCursor = getMessageCursor(rendered[0]);
-                hasMoreOlderMessages = visible.length >= MESSAGE_PAGE_SIZE;
-                if (!unreadFirstMsgId[activeChannel]) chatBox.scrollTop = chatBox.scrollHeight;
+                if (Array.isArray(messages)) {
+                    for (const msg of messages) {
+                        if (isMessageShadowbannedForViewer(msg)) continue;
+                        knownMessageIds.add(msg.id);
+                        await appendMessageUI(msg);
+                    }
+                }
             } catch (err) {
-                if (requestId === activeHistoryRequest) chatBox.innerHTML = `<div class="text-xs text-rose-400 italic text-center py-6">Failed to load messages: ${escapeHTML(err.message)}</div>`;
+                chatBox.innerHTML = `<div class="text-xs text-rose-400 italic text-center py-6">Failed to load messages: ${escapeHTML(err.message)}</div>`;
+            }
+
+            if (!unreadFirstMsgId[activeChannel]) {
+                chatBox.scrollTop = chatBox.scrollHeight;
             }
         }
-
-        // Load another page only when the reader reaches the top of the history pane.
-        chatBox.addEventListener('scroll', () => {
-            if (chatBox.scrollTop <= 80) loadOlderMessages();
-        }, { passive: true });
 
         document.getElementById('chat-form').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -4805,14 +4763,13 @@
                 }
             }
 
-            let text = msgInput.value.trim().slice(0, 500);
+            let text = msgInput.value.trim();
             if (!text && !selectedFile) return;
 
             if (replyTargetMsg) {
                 const cleanReplySnippet = replyTargetMsg.text.replace(/[\[\]]/g, '').substring(0, 60);
                 text = `[REPLY:${replyTargetMsg.id}:${replyTargetMsg.username}:${encodeURIComponent(cleanReplySnippet)}] ${text}`;
             }
-            text = text.slice(0, 500); // Hard client-side cap including embedded reply metadata.
 
             let mediaUrl = null;
             const fileToUpload = selectedFile;
@@ -4850,8 +4807,6 @@
                 showToast("Message delivery error: " + err.message, "error");
             }
         });
-
-        // --- FRIENDS & DMs ---
 
         document.getElementById('add-friend-btn').addEventListener('click', async () => {
             const targetUsername = document.getElementById('friend-username-input').value.trim().toLowerCase();
@@ -4954,6 +4909,7 @@
                 friendsList.innerHTML = '<p class="text-[11px] text-slate-500 italic px-2">No friends added</p>';
                 dmList.innerHTML = '<p id="no-dms-msg" class="text-[11px] text-slate-500 italic px-2">No active DMs</p>';
             }
+            updateDirectMessageUnreadTotal();
             checkAnnouncementsPermissions();
         }
 
@@ -4983,6 +4939,7 @@
             loadChannelMessages();
             loadChannels();
             loadFriends();
+            updateDirectMessageUnreadTotal();
         }
 
         function escapeHTML(str) {
